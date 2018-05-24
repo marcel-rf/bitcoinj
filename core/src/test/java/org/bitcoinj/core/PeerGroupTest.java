@@ -179,6 +179,36 @@ public class PeerGroupTest extends TestWithPeerGroup {
     }
 
     @Test
+    public void verifyProgressNotCalledAfterDoneDownload() throws InterruptedException {
+        peerGroup.start();
+        CountDownLatch latch = new CountDownLatch(1);
+        boolean done = false;
+        peerGroup.startBlockChainDownload(new DownloadProgressTracker() {
+            @Override
+            protected void progress(double progress, int blocksSoFar, Date date) {
+                super.progress(progress, blocksSoFar, date);
+                System.out.println("progress " + progress);
+
+                assertFalse("progress shouldn't be called after done", done);
+            }
+
+            @Override
+            protected void doneDownload() {
+                super.doneDownload();
+                System.out.println("doneDownload");
+
+                done = true;
+
+                Thread.sleep(2000);
+                latch.countDown();
+            }
+        });
+        System.out.println("Awaiting...");
+        latch.await();
+
+    }
+
+    @Test
     public void multiplePeerDiscovery() throws InterruptedException {
         peerGroup.setMaxPeersToDiscoverCount(98);
         peerGroup.addPeerDiscovery(createPeerDiscovery(1, 0));
