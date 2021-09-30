@@ -19,6 +19,8 @@ package org.bitcoinj.examples;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
+
 import org.bitcoinj.core.*;
 import org.bitcoinj.kits.WalletAppKit;
 import org.bitcoinj.params.TestNet3Params;
@@ -59,7 +61,7 @@ public class SendRequest {
         // In this example we catch the InsufficientMoneyException and register a BalanceFuture callback that runs once the wallet has enough balance.
         try {
             Wallet.SendResult result = kit.wallet().sendCoins(kit.peerGroup(), to, value);
-            System.out.println("coins sent. transaction hash: " + result.tx.getHashAsString());
+            System.out.println("coins sent. transaction hash: " + result.tx.getTxId());
             // you can use a block explorer like https://www.biteasy.com/ to inspect the transaction with the printed transaction hash. 
         } catch (InsufficientMoneyException e) {
             System.out.println("Not enough coins in your wallet. Missing " + e.missing.getValue() + " satoshis are missing (including fees)");
@@ -80,7 +82,7 @@ public class SendRequest {
                     System.out.println("something went wrong");
                 }
             };
-            Futures.addCallback(balanceFuture, callback);
+            Futures.addCallback(balanceFuture, callback, MoreExecutors.directExecutor());
         }
 
         // shutting down 

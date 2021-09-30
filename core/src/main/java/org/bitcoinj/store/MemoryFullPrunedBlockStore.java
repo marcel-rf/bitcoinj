@@ -17,9 +17,7 @@
 package org.bitcoinj.store;
 
 import org.bitcoinj.core.*;
-import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 
 import javax.annotation.Nullable;
 import java.util.*;
@@ -61,7 +59,7 @@ class StoredTransactionOutPoint {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(getIndex(), getHash());
+        return Objects.hash(getIndex(), getHash());
     }
     
     @Override
@@ -74,7 +72,7 @@ class StoredTransactionOutPoint {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         StoredTransactionOutPoint other = (StoredTransactionOutPoint) o;
-        return getIndex() == other.getIndex() && Objects.equal(getHash(), other.getHash());
+        return getIndex() == other.getIndex() && Objects.equals(getHash(), other.getHash());
     }
 }
 
@@ -261,15 +259,13 @@ public class MemoryFullPrunedBlockStore implements FullPrunedBlockStore {
         try {
             StoredBlock storedGenesisHeader = new StoredBlock(params.getGenesisBlock().cloneAsHeader(), params.getGenesisBlock().getWork(), 0);
             // The coinbase in the genesis block is not spendable
-            List<Transaction> genesisTransactions = Lists.newLinkedList();
+            List<Transaction> genesisTransactions = new LinkedList<>();
             StoredUndoableBlock storedGenesis = new StoredUndoableBlock(params.getGenesisBlock().getHash(), genesisTransactions);
             put(storedGenesisHeader, storedGenesis);
             setChainHead(storedGenesisHeader);
             setVerifiedChainHead(storedGenesisHeader);
             this.params = params;
-        } catch (BlockStoreException e) {
-            throw new RuntimeException(e);  // Cannot happen.
-        } catch (VerificationException e) {
+        } catch (BlockStoreException | VerificationException e) {
             throw new RuntimeException(e);  // Cannot happen.
         }
     }

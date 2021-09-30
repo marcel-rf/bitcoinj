@@ -51,12 +51,11 @@ import org.slf4j.LoggerFactory;
 import static org.fusesource.leveldbjni.JniDBFactory.*;
 
 import com.google.common.base.Stopwatch;
-import com.google.common.collect.Lists;
 
 /**
  * <p>
  * An implementation of a Fully Pruned Block Store using a leveldb implementation as the backing data store.
- * <p>
+ * </p>
  * 
  * <p>
  * Includes number of caches to optimise the initial blockchain download.
@@ -317,7 +316,7 @@ public class LevelDBFullPrunedBlockStore implements FullPrunedBlockStore {
         this.verifiedChainHeadBlock = get(hash);
         this.verifiedChainHeadHash = hash;
         if (this.verifiedChainHeadBlock == null) {
-            throw new BlockStoreException("corrupt databse block store - verified head block not found");
+            throw new BlockStoreException("corrupt database block store - verified head block not found");
         }
     }
 
@@ -331,7 +330,7 @@ public class LevelDBFullPrunedBlockStore implements FullPrunedBlockStore {
             // because of how the reference client inits
             // its database - the genesis transaction isn't actually in the db
             // so its spent flags can never be updated.
-            List<Transaction> genesisTransactions = Lists.newLinkedList();
+            List<Transaction> genesisTransactions = new LinkedList<>();
             StoredUndoableBlock storedGenesis = new StoredUndoableBlock(params.getGenesisBlock().getHash(),
                     genesisTransactions);
             beginDatabaseBatchWrite();
@@ -742,16 +741,12 @@ public class LevelDBFullPrunedBlockStore implements FullPrunedBlockStore {
                 return null;
             }
             ByteArrayInputStream bis = new ByteArrayInputStream(inbytes);
-            UTXO txout = new UTXO(bis);
+            UTXO txout = UTXO.fromStream(bis);
 
             if (instrument)
                 endMethod("getTransactionOutput");
             return txout;
-        } catch (DBException e) {
-            log.error("Exception in getTransactionOutput.", e);
-            if (instrument)
-                endMethod("getTransactionOutput");
-        } catch (IOException e) {
+        } catch (DBException | IOException e) {
             log.error("Exception in getTransactionOutput.", e);
             if (instrument)
                 endMethod("getTransactionOutput");
@@ -894,11 +889,7 @@ public class LevelDBFullPrunedBlockStore implements FullPrunedBlockStore {
                 a = LegacyAddress.fromBase58(params, out.getAddress());
                 hashBytes = a.getHash();
             }
-        } catch (AddressFormatException e) {
-            if (instrument)
-                endMethod("removeUnspentTransactionOutput");
-            return;
-        } catch (ScriptException e) {
+        } catch (AddressFormatException | ScriptException e) {
             if (instrument)
                 endMethod("removeUnspentTransactionOutput");
             return;

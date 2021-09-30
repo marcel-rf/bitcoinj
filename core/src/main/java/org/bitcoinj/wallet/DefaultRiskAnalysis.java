@@ -21,6 +21,7 @@ import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.ECKey;
 import org.bitcoinj.core.ECKey.ECDSASignature;
 import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.core.SignatureDecodeException;
 import org.bitcoinj.core.Transaction;
 import org.bitcoinj.core.TransactionConfidence;
 import org.bitcoinj.core.TransactionInput;
@@ -43,13 +44,6 @@ import static com.google.common.base.Preconditions.checkState;
  */
 public class DefaultRiskAnalysis implements RiskAnalysis {
     private static final Logger log = LoggerFactory.getLogger(DefaultRiskAnalysis.class);
-
-    /**
-     * Any standard output smaller than this value (in satoshis) will be considered risky, as it's most likely be
-     * rejected by the network. This is usually the same as {@link Transaction#MIN_NONDUST_OUTPUT} but can be
-     * different when the fee is about to change in Bitcoin Core.
-     */
-    public static final Coin MIN_ANALYSIS_NONDUST_OUTPUT = Transaction.MIN_NONDUST_OUTPUT;
 
     protected final Transaction tx;
     protected final List<Transaction> dependencies;
@@ -172,7 +166,7 @@ public class DefaultRiskAnalysis implements RiskAnalysis {
      * Checks the output to see if the script violates a standardness rule. Not complete.
      */
     public static RuleViolation isOutputStandard(TransactionOutput output) {
-        if (output.getValue().compareTo(MIN_ANALYSIS_NONDUST_OUTPUT) < 0)
+        if (output.isDust())
             return RuleViolation.DUST;
         for (ScriptChunk chunk : output.getScriptPubKey().getChunks()) {
             if (chunk.isPushData() && !chunk.isShortestPossiblePushData())
@@ -190,7 +184,7 @@ public class DefaultRiskAnalysis implements RiskAnalysis {
                 ECDSASignature signature;
                 try {
                     signature = ECKey.ECDSASignature.decodeFromDER(chunk.data);
-                } catch (IllegalArgumentException x) {
+                } catch (SignatureDecodeException x) {
                     // Doesn't look like a signature.
                     signature = null;
                 }
@@ -243,11 +237,11 @@ public class DefaultRiskAnalysis implements RiskAnalysis {
     @Override
     public String toString() {
         if (!analyzed)
-            return "Pending risk analysis for " + tx.getHashAsString();
+            return "Pending risk analysis for " + tx.getTxId();
         else if (nonFinal != null)
-            return "Risky due to non-finality of " + nonFinal.getHashAsString();
+            return "Risky due to non-finality of " + nonFinal.getTxId();
         else if (nonStandard != null)
-            return "Risky due to non-standard tx " + nonStandard.getHashAsString();
+            return "Risky due to non-standard tx " + nonStandard.getTxId();
         else
             return "Non-risky";
     }

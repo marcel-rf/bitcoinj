@@ -16,7 +16,7 @@
 
 package org.bitcoinj.core;
 
-import com.google.common.base.Objects;
+import com.google.common.base.Joiner;
 import com.google.common.net.InetAddresses;
 
 import javax.annotation.Nullable;
@@ -25,7 +25,10 @@ import java.io.OutputStream;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 /**
  * <p>A VersionMessage holds information exchanged during connection setup with another peer. Most of the fields are not
@@ -41,16 +44,20 @@ import java.util.Locale;
 public class VersionMessage extends Message {
 
     /** The version of this library release, as a string. */
-    public static final String BITCOINJ_VERSION = "0.15-SNAPSHOT";
+    public static final String BITCOINJ_VERSION = "0.16-SNAPSHOT";
     /** The value that is prepended to the subVer field of this application. */
     public static final String LIBRARY_SUBVER = "/bitcoinj:" + BITCOINJ_VERSION + "/";
 
-    /** A service bit that denotes whether the peer has a copy of the block chain or not. */
+    /** A service bit that denotes whether the peer has a full copy of the block chain or not. */
     public static final int NODE_NETWORK = 1 << 0;
     /** A service bit that denotes whether the peer supports the getutxos message or not. */
     public static final int NODE_GETUTXOS = 1 << 1;
+    /** A service bit that denotes whether the peer supports BIP37 bloom filters or not. The service bit is defined in BIP111. */
+    public static final int NODE_BLOOM = 1 << 2;
     /** Indicates that a node can be asked for blocks and transactions including witness data. */
     public static final int NODE_WITNESS = 1 << 3;
+    /** A service bit that denotes whether the peer has at least the last two days worth of blockchain (BIP159). */
+    public static final int NODE_NETWORK_LIMITED = 1 << 10;
     /** A service bit used by Bitcoin-ABC to announce Bitcoin Cash nodes. */
     public static final int NODE_BITCOIN_CASH = 1 << 5;
 
@@ -99,22 +106,20 @@ public class VersionMessage extends Message {
     
     public VersionMessage(NetworkParameters params, int newBestHeight) {
         super(params);
-        clientVersion = params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.CURRENT);
+        clientVersion = serializer.getProtocolVersion();
         localServices = 0;
-        time = System.currentTimeMillis() / 1000;
+        time = Utils.currentTimeSeconds();
         // Note that the Bitcoin Core doesn't do anything with these, and finding out your own external IP address
         // is kind of tricky anyway, so we just put nonsense here for now.
         InetAddress localhost = InetAddresses.forString("127.0.0.1");
-        receivingAddr = new PeerAddress(params, localhost, params.getPort(), clientVersion, BigInteger.ZERO);
+        MessageSerializer serializer = this.serializer.withProtocolVersion(0);
+        receivingAddr = new PeerAddress(params, localhost, params.getPort(), BigInteger.ZERO, serializer);
         receivingAddr.setParent(this);
-        fromAddr = new PeerAddress(params, localhost, params.getPort(), clientVersion, BigInteger.ZERO);
+        fromAddr = new PeerAddress(params, localhost, params.getPort(), BigInteger.ZERO, serializer);
         fromAddr.setParent(this);
         subVer = LIBRARY_SUBVER;
         bestHeight = newBestHeight;
         relayTxesBeforeFilter = true;
-
-        length = 4 + 8 + 8 + receivingAddr.getMessageSize() + fromAddr.getMessageSize() + 8
-                + VarInt.sizeOf(subVer.length()) + subVer.length() + 4 + 1;
     }
 
     @Override
@@ -122,10 +127,10 @@ public class VersionMessage extends Message {
         clientVersion = (int) readUint32();
         localServices = readUint64().longValue();
         time = readUint64().longValue();
-        receivingAddr = new PeerAddress(params, payload, cursor, 0, this, serializer);
+        receivingAddr = new PeerAddress(params, payload, cursor, this, serializer.withProtocolVersion(0));
         cursor += receivingAddr.getMessageSize();
         if (clientVersion >= 106) {
-            fromAddr = new PeerAddress(params, payload, cursor, 0, this, serializer);
+            fromAddr = new PeerAddress(params, payload, cursor, this, serializer.withProtocolVersion(0));
             cursor += fromAddr.getMessageSize();
             // uint64 localHostNonce (random data)
             // We don't care about the localhost nonce. It's used to detect connecting back to yourself in cases where
@@ -159,31 +164,21 @@ public class VersionMessage extends Message {
         Utils.uint32ToByteStreamLE(time, buf);
         Utils.uint32ToByteStreamLE(time >> 32, buf);
         receivingAddr.bitcoinSerializeToStream(buf);
-        if (clientVersion >= 106) {
-            fromAddr.bitcoinSerializeToStream(buf);
-            // Next up is the "local host nonce", this is to detect the case of connecting
-            // back to yourself. We don't care about this as we won't be accepting inbound
-            // connections.
-            Utils.uint32ToByteStreamLE(0, buf);
-            Utils.uint32ToByteStreamLE(0, buf);
-            // Now comes subVer.
-            byte[] subVerBytes = subVer.getBytes(StandardCharsets.UTF_8);
-            buf.write(new VarInt(subVerBytes.length).encode());
-            buf.write(subVerBytes);
-            // Size of known block chain.
-            Utils.uint32ToByteStreamLE(bestHeight, buf);
-            if (clientVersion >= params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.BLOOM_FILTER)) {
-                buf.write(relayTxesBeforeFilter ? 1 : 0);
-            }
+        fromAddr.bitcoinSerializeToStream(buf);
+        // Next up is the "local host nonce", this is to detect the case of connecting
+        // back to yourself. We don't care about this as we won't be accepting inbound
+        // connections.
+        Utils.uint32ToByteStreamLE(0, buf);
+        Utils.uint32ToByteStreamLE(0, buf);
+        // Now comes subVer.
+        byte[] subVerBytes = subVer.getBytes(StandardCharsets.UTF_8);
+        buf.write(new VarInt(subVerBytes.length).encode());
+        buf.write(subVerBytes);
+        // Size of known block chain.
+        Utils.uint32ToByteStreamLE(bestHeight, buf);
+        if (clientVersion >= params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.BLOOM_FILTER)) {
+            buf.write(relayTxesBeforeFilter ? 1 : 0);
         }
-    }
-
-    /**
-     * Returns true if the version message indicates the sender has a full copy of the block chain,
-     * or if it's running in client mode (only has the headers).
-     */
-    public boolean hasBlockChain() {
-        return (localServices & NODE_NETWORK) == NODE_NETWORK;
     }
 
     @Override
@@ -203,23 +198,25 @@ public class VersionMessage extends Message {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(bestHeight, clientVersion, localServices,
+        return Objects.hash(bestHeight, clientVersion, localServices,
             time, subVer, receivingAddr, fromAddr, relayTxesBeforeFilter);
     }
 
     @Override
     public String toString() {
-        StringBuilder stringBuilder = new StringBuilder();
-        stringBuilder.append("\n");
-        stringBuilder.append("client version: ").append(clientVersion).append("\n");
-        stringBuilder.append("local services: ").append(localServices).append("\n");
-        stringBuilder.append("time:           ").append(time).append("\n");
-        stringBuilder.append("receiving addr: ").append(receivingAddr).append("\n");
-        stringBuilder.append("from addr:      ").append(fromAddr).append("\n");
-        stringBuilder.append("sub version:    ").append(subVer).append("\n");
-        stringBuilder.append("best height:    ").append(bestHeight).append("\n");
-        stringBuilder.append("delay tx relay: ").append(!relayTxesBeforeFilter).append("\n");
-        return stringBuilder.toString();
+        StringBuilder builder = new StringBuilder("\n");
+        builder.append("client version: ").append(clientVersion).append("\n");
+        builder.append("local services: ").append(localServices);
+        if (localServices != 0)
+            builder.append(" (").append(toStringServices(localServices)).append(")");
+        builder.append("\n");
+        builder.append("time:           ").append(time).append("\n");
+        builder.append("receiving addr: ").append(receivingAddr).append("\n");
+        builder.append("from addr:      ").append(fromAddr).append("\n");
+        builder.append("sub version:    ").append(subVer).append("\n");
+        builder.append("best height:    ").append(bestHeight).append("\n");
+        builder.append("delay tx relay: ").append(!relayTxesBeforeFilter).append("\n");
+        return builder.toString();
     }
 
     public VersionMessage duplicate() {
@@ -245,7 +242,7 @@ public class VersionMessage extends Message {
      * and version are not allowed to contain such characters.</p>
      *
      * <p>Anything put in the "comments" field will appear in brackets and may be used for platform info, or anything
-     * else. For example, calling <tt>appendToSubVer("MultiBit", "1.0", "Windows")</tt> will result in a subVer being
+     * else. For example, calling {@code appendToSubVer("MultiBit", "1.0", "Windows")} will result in a subVer being
      * set of "/bitcoinj:1.0/MultiBit:1.0(Windows)/". Therefore the / ( and ) characters are reserved in all these
      * components. If you don't want to add a comment (recommended), pass null.</p>
      *
@@ -279,12 +276,15 @@ public class VersionMessage extends Message {
     }
 
     /**
-     * Returns true if the clientVersion field is {@link NetworkParameters.ProtocolVersion#BLOOM_FILTER} or higher.
-     * If it is then Bloom filtering
-     * is available and the memory pool of the remote peer will be queried when the downloadData property is true.
+     * Returns true if the peer supports bloom filtering according to BIP37 and BIP111.
      */
     public boolean isBloomFilteringSupported() {
-        return clientVersion >= params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.BLOOM_FILTER);
+        if (clientVersion >= params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.BLOOM_FILTER)
+                && clientVersion < params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.BLOOM_FILTER_BIP111))
+            return true;
+        if ((localServices & NODE_BLOOM) == NODE_BLOOM)
+            return true;
+        return false;
     }
 
     /** Returns true if the protocol version and service bits both indicate support for the getutxos message. */
@@ -296,5 +296,45 @@ public class VersionMessage extends Message {
     /** Returns true if a peer can be asked for blocks and transactions including witness data. */
     public boolean isWitnessSupported() {
         return (localServices & NODE_WITNESS) == NODE_WITNESS;
+    }
+
+    /**
+     * Returns true if the version message indicates the sender has a full copy of the block chain, or false if it's
+     * running in client mode (only has the headers).
+     */
+    public boolean hasBlockChain() {
+        return (localServices & NODE_NETWORK) == NODE_NETWORK;
+    }
+
+    /** Returns true if the peer has at least the last two days worth of blockchain (BIP159). */
+    public boolean hasLimitedBlockChain() {
+        return hasBlockChain() || (localServices & NODE_NETWORK_LIMITED) == NODE_NETWORK_LIMITED;
+    }
+
+    public static String toStringServices(long services) {
+        List<String> strings = new LinkedList<>();
+        if ((services & NODE_NETWORK) == NODE_NETWORK) {
+            strings.add("NETWORK");
+            services &= ~NODE_NETWORK;
+        }
+        if ((services & NODE_GETUTXOS) == NODE_GETUTXOS) {
+            strings.add("GETUTXOS");
+            services &= ~NODE_GETUTXOS;
+        }
+        if ((services & NODE_BLOOM) == NODE_BLOOM) {
+            strings.add("BLOOM");
+            services &= ~NODE_BLOOM;
+        }
+        if ((services & NODE_WITNESS) == NODE_WITNESS) {
+            strings.add("WITNESS");
+            services &= ~NODE_WITNESS;
+        }
+        if ((services & NODE_NETWORK_LIMITED) == NODE_NETWORK_LIMITED) {
+            strings.add("NETWORK_LIMITED");
+            services &= ~NODE_NETWORK_LIMITED;
+        }
+        if (services != 0)
+            strings.add("remaining: " + Long.toBinaryString(services));
+        return Joiner.on(", ").join(strings);
     }
 }

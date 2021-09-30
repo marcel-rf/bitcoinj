@@ -17,7 +17,6 @@
 
 package org.bitcoinj.wallet;
 
-import com.google.protobuf.Message;
 import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.PeerAddress;
@@ -37,11 +36,9 @@ import org.bitcoinj.utils.ExchangeRate;
 import org.bitcoinj.utils.Fiat;
 import org.bitcoinj.wallet.Protos.Wallet.EncryptionType;
 
-import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
-import com.google.protobuf.TextFormat;
 import com.google.protobuf.WireFormat;
 
 import org.slf4j.Logger;
@@ -67,7 +64,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * a data interchange format developed by Google with an efficient binary representation, a type safe specification
  * language and compilers that generate code to work with those data structures for many languages. Protocol buffers
  * can have their format evolved over time: conceptually they represent data using (tag, length, value) tuples. The
- * format is defined by the <tt>wallet.proto</tt> file in the bitcoinj source distribution.<p>
+ * format is defined by the {@code wallet.proto} file in the bitcoinj source distribution.<p>
  *
  * This class is used through its static methods. The most common operations are writeWallet and readWallet, which do
  * the obvious operations on Output/InputStreams. You can use a {@link ByteArrayInputStream} and equivalent
@@ -147,7 +144,7 @@ public class WalletProtobufSerializer {
     /**
      * Formats the given wallet (transactions and keys) to the given output stream in protocol buffer format.<p>
      *
-     * Equivalent to <tt>walletToProto(wallet).writeTo(output);</tt>
+     * Equivalent to {@code walletToProto(wallet).writeTo(output);}
      */
     public void writeWallet(Wallet wallet, OutputStream output) throws IOException {
         Protos.Wallet walletProto = walletToProto(wallet);
@@ -157,15 +154,14 @@ public class WalletProtobufSerializer {
     }
 
     /**
-     * Returns the given wallet formatted as text. The text format is that used by protocol buffers and although it
-     * can also be parsed using {@link TextFormat#merge(CharSequence, Message.Builder)},
+     * Returns the given wallet formatted as text. The text format is that used by protocol buffers and
      * it is designed more for debugging than storage. It is not well specified and wallets are largely binary data
      * structures anyway, consisting as they do of keys (large random numbers) and {@link Transaction}s which also
      * mostly contain keys and hashes.
      */
     public String walletToText(Wallet wallet) {
         Protos.Wallet walletProto = walletToProto(wallet);
-        return TextFormat.printToString(walletProto);
+        return walletProto.toString();
     }
 
     /**
@@ -255,7 +251,7 @@ public class WalletProtobufSerializer {
         Protos.Transaction.Builder txBuilder = Protos.Transaction.newBuilder();
 
         txBuilder.setPool(getProtoPool(wtx))
-                 .setHash(hashToByteString(tx.getHash()))
+                 .setHash(hashToByteString(tx.getTxId()))
                  .setVersion((int) tx.getVersion());
 
         if (tx.getUpdateTime() != null) {
@@ -294,10 +290,9 @@ public class WalletProtobufSerializer {
                 .setValue(output.getValue().value);
             final TransactionInput spentBy = output.getSpentBy();
             if (spentBy != null) {
-                Sha256Hash spendingHash = spentBy.getParentTransaction().getHash();
-                int spentByTransactionIndex = spentBy.getParentTransaction().getInputs().indexOf(spentBy);
+                Sha256Hash spendingHash = spentBy.getParentTransaction().getTxId();
                 outputBuilder.setSpentByTransactionHash(hashToByteString(spendingHash))
-                             .setSpentByTransactionIndex(spentByTransactionIndex);
+                             .setSpentByTransactionIndex(spentBy.getIndex());
             }
             txBuilder.addTransactionOutput(outputBuilder);
         }
@@ -360,7 +355,7 @@ public class WalletProtobufSerializer {
                                         TransactionConfidence confidence,
                                         Protos.TransactionConfidence.Builder confidenceBuilder) {
         synchronized (confidence) {
-            confidenceBuilder.setType(Protos.TransactionConfidence.Type.valueOf(confidence.getConfidenceType().getValue()));
+            confidenceBuilder.setType(Protos.TransactionConfidence.Type.forNumber(confidence.getConfidenceType().getValue()));
             if (confidence.getConfidenceType() == ConfidenceType.BUILDING) {
                 confidenceBuilder.setAppearedAtHeight(confidence.getAppearedAtChainHeight());
                 confidenceBuilder.setDepth(confidence.getDepthInBlocks());
@@ -369,7 +364,7 @@ public class WalletProtobufSerializer {
                 // Copy in the overriding transaction, if available.
                 // (A dead coinbase transaction has no overriding transaction).
                 if (confidence.getOverridingTransaction() != null) {
-                    Sha256Hash overridingHash = confidence.getOverridingTransaction().getHash();
+                    Sha256Hash overridingHash = confidence.getOverridingTransaction().getTxId();
                     confidenceBuilder.setOverridingTransaction(hashToByteString(overridingHash));
                 }
             }
@@ -445,11 +440,7 @@ public class WalletProtobufSerializer {
             if (params == null)
                 throw new UnreadableWalletException("Unknown network parameters ID " + paramsID);
             return readWallet(params, extensions, walletProto, forceReset);
-        } catch (IOException e) {
-            throw new UnreadableWalletException("Could not parse input stream to protobuf", e);
-        } catch (IllegalStateException e) {
-            throw new UnreadableWalletException("Could not parse input stream to protobuf", e);
-        } catch (IllegalArgumentException e) {
+        } catch (IOException | IllegalArgumentException | IllegalStateException e) {
             throw new UnreadableWalletException("Could not parse input stream to protobuf", e);
         }
     }
@@ -504,7 +495,7 @@ public class WalletProtobufSerializer {
         }
         Wallet wallet = factory.create(params, keyChainGroup);
 
-        List<Script> scripts = Lists.newArrayList();
+        List<Script> scripts = new ArrayList<>();
         for (Protos.Script protoScript : walletProto.getWatchedScriptList()) {
             try {
                 Script script =
@@ -700,8 +691,8 @@ public class WalletProtobufSerializer {
 
         // Transaction should now be complete.
         Sha256Hash protoHash = byteStringToHash(txProto.getHash());
-        if (!tx.getHash().equals(protoHash))
-            throw new UnreadableWalletException(String.format(Locale.US, "Transaction did not deserialize completely: %s vs %s", tx.getHash(), protoHash));
+        if (!tx.getTxId().equals(protoHash))
+            throw new UnreadableWalletException(String.format(Locale.US, "Transaction did not deserialize completely: %s vs %s", tx.getTxId(), protoHash));
         if (txMap.containsKey(txProto.getHash()))
             throw new UnreadableWalletException("Wallet contained duplicate transaction " + byteStringToHash(txProto.getHash()));
         txMap.put(txProto.getHash(), tx);
@@ -735,7 +726,7 @@ public class WalletProtobufSerializer {
                 Transaction spendingTx = txMap.get(spentByTransactionHash);
                 if (spendingTx == null) {
                     throw new UnreadableWalletException(String.format(Locale.US, "Could not connect %s to %s",
-                            tx.getHashAsString(), byteStringToHash(spentByTransactionHash)));
+                            tx.getTxId(), byteStringToHash(spentByTransactionHash)));
                 }
                 final int spendingIndex = transactionOutput.getSpentByTransactionIndex();
                 TransactionInput input = checkNotNull(spendingTx.getInput(spendingIndex));
@@ -758,7 +749,7 @@ public class WalletProtobufSerializer {
         // We are lenient here because tx confidence is not an essential part of the wallet.
         // If the tx has an unknown type of confidence, ignore.
         if (!confidenceProto.hasType()) {
-            log.warn("Unknown confidence type for tx {}", tx.getHashAsString());
+            log.warn("Unknown confidence type for tx {}", tx.getTxId());
             return;
         }
         ConfidenceType confidenceType;
@@ -777,27 +768,27 @@ public class WalletProtobufSerializer {
         confidence.setConfidenceType(confidenceType);
         if (confidenceProto.hasAppearedAtHeight()) {
             if (confidence.getConfidenceType() != ConfidenceType.BUILDING) {
-                log.warn("Have appearedAtHeight but not BUILDING for tx {}", tx.getHashAsString());
+                log.warn("Have appearedAtHeight but not BUILDING for tx {}", tx.getTxId());
                 return;
             }
             confidence.setAppearedAtChainHeight(confidenceProto.getAppearedAtHeight());
         }
         if (confidenceProto.hasDepth()) {
             if (confidence.getConfidenceType() != ConfidenceType.BUILDING) {
-                log.warn("Have depth but not BUILDING for tx {}", tx.getHashAsString());
+                log.warn("Have depth but not BUILDING for tx {}", tx.getTxId());
                 return;
             }
             confidence.setDepthInBlocks(confidenceProto.getDepth());
         }
         if (confidenceProto.hasOverridingTransaction()) {
             if (confidence.getConfidenceType() != ConfidenceType.DEAD) {
-                log.warn("Have overridingTransaction but not OVERRIDDEN for tx {}", tx.getHashAsString());
+                log.warn("Have overridingTransaction but not OVERRIDDEN for tx {}", tx.getTxId());
                 return;
             }
             Transaction overridingTransaction =
                 txMap.get(confidenceProto.getOverridingTransaction());
             if (overridingTransaction == null) {
-                log.warn("Have overridingTransaction that is not in wallet for tx {}", tx.getHashAsString());
+                log.warn("Have overridingTransaction that is not in wallet for tx {}", tx.getTxId());
                 return;
             }
             confidence.setOverridingTransaction(overridingTransaction);
@@ -810,9 +801,8 @@ public class WalletProtobufSerializer {
                 throw new UnreadableWalletException("Peer IP address does not have the right length", e);
             }
             int port = proto.getPort();
-            int protocolVersion = params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.CURRENT);
             BigInteger services = BigInteger.valueOf(proto.getServices());
-            PeerAddress address = new PeerAddress(params, ip, port, protocolVersion, services);
+            PeerAddress address = new PeerAddress(params, ip, port, services);
             confidence.markBroadcastBy(address);
         }
         if (confidenceProto.hasLastBroadcastedAt())

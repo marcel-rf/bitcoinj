@@ -76,7 +76,7 @@ public class CheckpointManager {
     private static final String TEXTUAL_MAGIC = "TXT CHECKPOINTS 1";
     private static final int MAX_SIGNATURES = 256;
 
-    // Map of block header time to data.
+    // Map of block header time (in seconds) to data.
     protected final TreeMap<Long, StoredBlock> checkpoints = new TreeMap<>();
 
     protected final NetworkParameters params;
@@ -121,7 +121,7 @@ public class CheckpointManager {
             digestInputStream.on(false);
             byte[] header = new byte[BINARY_MAGIC.length()];
             dis.readFully(header);
-            if (!Arrays.equals(header, BINARY_MAGIC.getBytes("US-ASCII")))
+            if (!Arrays.equals(header, BINARY_MAGIC.getBytes(StandardCharsets.US_ASCII)))
                 throw new IOException("Header bytes did not match expected version");
             int numSignatures = checkPositionIndex(dis.readInt(), MAX_SIGNATURES, "Num signatures out of range");
             for (int i = 0; i < numSignatures; i++) {
@@ -142,7 +142,8 @@ public class CheckpointManager {
                 checkpoints.put(block.getHeader().getTimeSeconds(), block);
             }
             Sha256Hash dataHash = Sha256Hash.wrap(digest.digest());
-            log.info("Read {} checkpoints, hash is {}", checkpoints.size(), dataHash);
+            log.info("Read {} checkpoints up to time {}, hash is {}", checkpoints.size(),
+                    Utils.dateTimeFormat(checkpoints.lastEntry().getKey() * 1000), dataHash);
             return dataHash;
         } catch (ProtocolException e) {
             throw new IOException(e);
@@ -154,9 +155,8 @@ public class CheckpointManager {
 
     private Sha256Hash readTextual(InputStream inputStream) throws IOException {
         Hasher hasher = Hashing.sha256().newHasher();
-        BufferedReader reader = null;
-        try {
-            reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.US_ASCII));
+        try (BufferedReader reader =
+                     new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.US_ASCII))) {
             String magic = reader.readLine();
             if (!TEXTUAL_MAGIC.equals(magic))
                 throw new IOException("unexpected magic: " + magic);
@@ -179,10 +179,9 @@ public class CheckpointManager {
                 checkpoints.put(block.getHeader().getTimeSeconds(), block);
             }
             HashCode hash = hasher.hash();
-            log.info("Read {} checkpoints, hash is {}", checkpoints.size(), hash);
+            log.info("Read {} checkpoints up to time {}, hash is {}", checkpoints.size(),
+                    Utils.dateTimeFormat(checkpoints.lastEntry().getKey() * 1000), hash);
             return Sha256Hash.wrap(hash.asBytes());
-        } finally {
-            if (reader != null) reader.close();
         }
     }
 
@@ -190,11 +189,11 @@ public class CheckpointManager {
      * Returns a {@link StoredBlock} representing the last checkpoint before the given time, for example, normally
      * you would want to know the checkpoint before the earliest wallet birthday.
      */
-    public StoredBlock getCheckpointBefore(long time) {
+    public StoredBlock getCheckpointBefore(long timeSecs) {
         try {
-            checkArgument(time > params.getGenesisBlock().getTimeSeconds());
+            checkArgument(timeSecs > params.getGenesisBlock().getTimeSeconds());
             // This is thread safe because the map never changes after creation.
-            Map.Entry<Long, StoredBlock> entry = checkpoints.floorEntry(time);
+            Map.Entry<Long, StoredBlock> entry = checkpoints.floorEntry(timeSecs);
             if (entry != null) return entry.getValue();
             Block genesis = params.getGenesisBlock().cloneAsHeader();
             return new StoredBlock(genesis, genesis.getWork(), 0);
@@ -218,22 +217,23 @@ public class CheckpointManager {
      * time, then inserts it into the store and sets that to be the chain head. Useful when you have just created
      * a new store from scratch and want to use configure it all in one go.</p>
      *
-     * <p>Note that time is adjusted backwards by a week to account for possible clock drift in the block headers.</p>
+     * <p>Note that timeSecs is adjusted backwards by a week to account for possible clock drift in the block headers.</p>
      */
-    public static void checkpoint(NetworkParameters params, InputStream checkpoints, BlockStore store, long time)
+    public static void checkpoint(NetworkParameters params, InputStream checkpoints, BlockStore store, long timeSecs)
             throws IOException, BlockStoreException {
         checkNotNull(params);
         checkNotNull(store);
         checkArgument(!(store instanceof FullPrunedBlockStore), "You cannot use checkpointing with a full store.");
 
-        time -= 86400 * 7;
+        timeSecs -= 60 * 60 * 24 * 7; // one week in seconds
 
-        checkArgument(time > 0);
-        log.info("Attempting to initialize a new block store with a checkpoint for time {} ({})", time, Utils.dateTimeFormat(time * 1000));
+        checkArgument(timeSecs > 0);
+        log.info("Attempting to initialize a new block store with a checkpoint for time {} ({})", timeSecs,
+                Utils.dateTimeFormat(timeSecs * 1000));
 
         BufferedInputStream stream = new BufferedInputStream(checkpoints);
         CheckpointManager manager = new CheckpointManager(params, stream);
-        StoredBlock checkpoint = manager.getCheckpointBefore(time);
+        StoredBlock checkpoint = manager.getCheckpointBefore(timeSecs);
         store.put(checkpoint);
         store.setChainHead(checkpoint);
     }

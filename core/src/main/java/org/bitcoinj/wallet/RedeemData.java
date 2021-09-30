@@ -1,5 +1,6 @@
 /*
  * Copyright 2014 Kosta Korenkov
+ * Copyright 2019 Andreas Schildbach
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +20,8 @@ package org.bitcoinj.wallet;
 import org.bitcoinj.core.ECKey;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptPattern;
+
+import com.google.common.base.MoreObjects;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,12 +53,13 @@ public class RedeemData {
     }
 
     /**
-     * Creates RedeemData for P2PKH or P2PK input. Provided key is a single private key needed
-     * to spend such inputs and provided program should be a proper CHECKSIG program.
+     * Creates RedeemData for P2PKH, P2WPKH or P2PK input. Provided key is a single private key needed
+     * to spend such inputs.
      */
-    public static RedeemData of(ECKey key, Script program) {
-        checkArgument(ScriptPattern.isPayToPubKeyHash(program) || ScriptPattern.isPayToPubKey(program));
-        return key != null ? new RedeemData(Collections.singletonList(key), program) : null;
+    public static RedeemData of(ECKey key, Script redeemScript) {
+        checkArgument(ScriptPattern.isP2PKH(redeemScript)
+                || ScriptPattern.isP2WPKH(redeemScript) || ScriptPattern.isP2PK(redeemScript));
+        return key != null ? new RedeemData(Collections.singletonList(key), redeemScript) : null;
     }
 
     /**
@@ -66,5 +70,13 @@ public class RedeemData {
             if (key.hasPrivKey())
                 return key;
         return null;
+    }
+
+    @Override
+    public String toString() {
+        final MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(this).omitNullValues();
+        helper.add("redeemScript", redeemScript);
+        helper.add("keys", keys);
+        return helper.toString();
     }
 }

@@ -23,9 +23,9 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 import static org.bitcoinj.core.Utils.*;
-import com.google.common.base.Objects;
 
 /**
  * <p>A data structure that contains proofs of block inclusion for one or more transactions, in an efficient manner.</p>
@@ -117,12 +117,12 @@ public class PartialMerkleTree extends Message {
     protected void parse() throws ProtocolException {
         transactionCount = (int)readUint32();
 
-        int nHashes = (int) readVarInt();
+        int nHashes = readVarInt().intValue();
         hashes = new ArrayList<>(Math.min(nHashes, Utils.MAX_INITIAL_ARRAY_LENGTH));
         for (int i = 0; i < nHashes; i++)
             hashes.add(readHash());
 
-        int nFlagBytes = (int) readVarInt();
+        int nFlagBytes = readVarInt().intValue();
         matchedChildBits = readBytes(nFlagBytes);
 
         length = cursor - offset;
@@ -215,9 +215,7 @@ public class PartialMerkleTree extends Message {
     }
 
     private static Sha256Hash combineLeftRight(byte[] left, byte[] right) {
-        return Sha256Hash.wrapReversed(Sha256Hash.hashTwice(
-            reverseBytes(left), 0, 32,
-            reverseBytes(right), 0, 32));
+        return Sha256Hash.wrapReversed(Sha256Hash.hashTwice(reverseBytes(left), reverseBytes(right)));
     }
 
     /**
@@ -277,7 +275,7 @@ public class PartialMerkleTree extends Message {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(transactionCount, hashes, Arrays.hashCode(matchedChildBits));
+        return Objects.hash(transactionCount, hashes, Arrays.hashCode(matchedChildBits));
     }
 
     @Override

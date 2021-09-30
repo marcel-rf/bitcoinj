@@ -18,7 +18,6 @@
 
 package org.bitcoinj.store;
 
-import com.google.common.collect.Lists;
 import org.bitcoinj.core.*;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.Script.ScriptType;
@@ -557,7 +556,7 @@ public abstract class DatabaseFullPrunedBlockStore implements FullPrunedBlockSto
             StoredBlock storedGenesisHeader = new StoredBlock(params.getGenesisBlock().cloneAsHeader(), params.getGenesisBlock().getWork(), 0);
             // The coinbase in the genesis block is not spendable. This is because of how Bitcoin Core inits
             // its database - the genesis transaction isn't actually in the db so its spent flags can never be updated.
-            List<Transaction> genesisTransactions = Lists.newLinkedList();
+            List<Transaction> genesisTransactions = new LinkedList<>();
             StoredUndoableBlock storedGenesis = new StoredUndoableBlock(params.getGenesisBlock().getHash(), genesisTransactions);
             put(storedGenesisHeader, storedGenesis);
             setChainHead(storedGenesisHeader);
@@ -743,14 +742,8 @@ public abstract class DatabaseFullPrunedBlockStore implements FullPrunedBlockSto
             b.verifyHeader();
             StoredBlock stored = new StoredBlock(b, chainWork, height);
             return stored;
-        } catch (SQLException ex) {
-            throw new BlockStoreException(ex);
-        } catch (ProtocolException e) {
-            // Corrupted database.
-            throw new BlockStoreException(e);
-        } catch (VerificationException e) {
-            // Should not be able to happen unless the database contains bad
-            // blocks.
+        } catch (SQLException | VerificationException e) {
+            // VerificationException: Should not be able to happen unless the database contains bad blocks.
             throw new BlockStoreException(e);
         } finally {
             if (s != null) {
@@ -809,19 +802,8 @@ public abstract class DatabaseFullPrunedBlockStore implements FullPrunedBlockSto
                 block = new StoredUndoableBlock(hash, outChangesObject);
             }
             return block;
-        } catch (SQLException ex) {
-            throw new BlockStoreException(ex);
-        } catch (NullPointerException e) {
-            // Corrupted database.
-            throw new BlockStoreException(e);
-        } catch (ClassCastException e) {
-            // Corrupted database.
-            throw new BlockStoreException(e);
-        } catch (ProtocolException e) {
-            // Corrupted database.
-            throw new BlockStoreException(e);
-        } catch (IOException e) {
-            // Corrupted database.
+        } catch (SQLException | IOException | ProtocolException | ClassCastException | NullPointerException e) {
+            // IOException, ProtocolException, ClassCastException, NullPointerException: Corrupted database.
             throw new BlockStoreException(e);
         } finally {
             if (s != null) {
@@ -1172,10 +1154,8 @@ public abstract class DatabaseFullPrunedBlockStore implements FullPrunedBlockSto
                 }
             }
             return outputs;
-        } catch (SQLException ex) {
+        } catch (SQLException | BlockStoreException ex) {
             throw new UTXOProviderException(ex);
-        } catch (BlockStoreException bse) {
-            throw new UTXOProviderException(bse);
         } finally {
             if (s != null)
                 try {

@@ -18,7 +18,7 @@ package org.bitcoinj.utils;
 
 import static org.bitcoinj.core.Coin.SMALLEST_UNIT_EXPONENT;
 import static com.google.common.base.Preconditions.checkArgument;
-import com.google.common.base.Objects;
+import java.util.Objects;
 import org.bitcoinj.core.Coin;
 
 import java.math.BigInteger;
@@ -70,7 +70,7 @@ public final class BtcFixedFormat extends BtcFormat {
     public static final int[] REPEATING_TRIPLETS = {3,3,3,3,3};
 
     /** The number of places the decimal point of formatted values is shifted rightward from
-     *  thet same value expressed in bitcoins. */
+     *  the same value expressed in bitcoins. */
     private final int scale;
 
     /** Constructor */
@@ -146,7 +146,7 @@ public final class BtcFixedFormat extends BtcFormat {
      *  @see java.lang.Object#hashCode
      */
     @Override public int hashCode() {
-        return Objects.hashCode(super.hashCode(), scale);
+        return Objects.hash(super.hashCode(), scale);
     }
 
     private static String prefixLabel(int scale) {

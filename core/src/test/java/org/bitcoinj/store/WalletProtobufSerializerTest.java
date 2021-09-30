@@ -37,6 +37,7 @@ import org.bitcoinj.core.Utils;
 import org.bitcoinj.crypto.DeterministicKey;
 import org.bitcoinj.params.MainNetParams;
 import org.bitcoinj.params.UnitTestParams;
+import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
 import org.bitcoinj.testing.FakeTxBuilder;
 import org.bitcoinj.testing.FooWalletExtension;
@@ -44,6 +45,7 @@ import org.bitcoinj.utils.BriefLogFormatter;
 import org.bitcoinj.utils.Threading;
 import org.bitcoinj.wallet.DeterministicKeyChain;
 import org.bitcoinj.wallet.KeyChain;
+import org.bitcoinj.wallet.KeyChainGroup;
 
 import com.google.common.io.ByteStreams;
 import com.google.protobuf.ByteString;
@@ -58,6 +60,7 @@ import org.bitcoinj.wallet.WalletTransaction;
 import org.bitcoinj.wallet.WalletTransaction.Pool;
 import org.bitcoinj.wallet.listeners.WalletCoinsReceivedEventListener;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
@@ -76,7 +79,7 @@ import static org.junit.Assert.*;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 public class WalletProtobufSerializerTest {
-    private static final NetworkParameters UNITTEST = UnitTestParams.get();
+    private static NetworkParameters UNITTEST;
     private static final NetworkParameters MAINNET = MainNetParams.get();
 
     private ECKey myKey;
@@ -87,17 +90,21 @@ public class WalletProtobufSerializerTest {
     public static String WALLET_DESCRIPTION  = "The quick brown fox lives in \u4f26\u6566"; // Beijing in Chinese
     private long mScriptCreationTime;
 
+    @BeforeClass
+    public static void setUpClass() throws Exception {
+        Utils.resetMocking();
+        UNITTEST = UnitTestParams.get();
+    }
+
     @Before
     public void setUp() throws Exception {
         BriefLogFormatter.initVerbose();
         Context ctx = new Context(UNITTEST);
         myWatchedKey = new ECKey();
-        myWallet = new Wallet(UNITTEST);
         myKey = new ECKey();
         myKey.setCreationTimeSeconds(123456789L);
-        myWallet.importKey(myKey);
         myAddress = LegacyAddress.fromKey(UNITTEST, myKey);
-        myWallet = new Wallet(UNITTEST);
+        myWallet = new Wallet(UNITTEST, KeyChainGroup.builder(UNITTEST).fromRandom(Script.ScriptType.P2PKH).build());
         myWallet.importKey(myKey);
         mScriptCreationTime = new Date().getTime() / 1000 - 1234;
         myWallet.addWatchedAddress(LegacyAddress.fromKey(UNITTEST, myWatchedKey), mScriptCreationTime);
@@ -110,12 +117,10 @@ public class WalletProtobufSerializerTest {
         Wallet wallet1 = roundTrip(myWallet);
         assertEquals(0, wallet1.getTransactions(true).size());
         assertEquals(Coin.ZERO, wallet1.getBalance());
-        assertArrayEquals(myKey.getPubKey(),
-                wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getPubKey());
-        assertArrayEquals(myKey.getPrivKeyBytes(),
-                wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getPrivKeyBytes());
-        assertEquals(myKey.getCreationTimeSeconds(),
-                wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getCreationTimeSeconds());
+        ECKey foundKey = wallet1.findKeyFromPubKeyHash(myKey.getPubKeyHash(), null);
+        assertArrayEquals(myKey.getPubKey(), foundKey.getPubKey());
+        assertArrayEquals(myKey.getPrivKeyBytes(), foundKey.getPrivKeyBytes());
+        assertEquals(myKey.getCreationTimeSeconds(), foundKey.getCreationTimeSeconds());
         assertEquals(mScriptCreationTime,
                 wallet1.getWatchedScripts().get(0).getCreationTimeSeconds());
         assertEquals(1, wallet1.getWatchedScripts().size());
@@ -136,7 +141,7 @@ public class WalletProtobufSerializerTest {
         Wallet wallet1 = roundTrip(myWallet);
         assertEquals(1, wallet1.getTransactions(true).size());
         assertEquals(v1, wallet1.getBalance(Wallet.BalanceType.ESTIMATED));
-        Transaction t1copy = wallet1.getTransaction(t1.getHash());
+        Transaction t1copy = wallet1.getTransaction(t1.getTxId());
         assertArrayEquals(t1.unsafeBitcoinSerialize(), t1copy.unsafeBitcoinSerialize());
         assertEquals(2, t1copy.getConfidence().numBroadcastPeers());
         assertNotNull(t1copy.getConfidence().getLastBroadcastedAt());
@@ -150,7 +155,7 @@ public class WalletProtobufSerializerTest {
         
         Protos.Transaction t1p = walletProto.getTransaction(0);
         assertEquals(0, t1p.getBlockHashCount());
-        assertArrayEquals(t1.getHash().getBytes(), t1p.getHash().toByteArray());
+        assertArrayEquals(t1.getTxId().getBytes(), t1p.getHash().toByteArray());
         assertEquals(Protos.Transaction.Pool.PENDING, t1p.getPool());
         assertFalse(t1p.hasLockTime());
         assertFalse(t1p.getTransactionInput(0).hasSequence());
@@ -168,7 +173,7 @@ public class WalletProtobufSerializerTest {
         t1.setPurpose(Purpose.RAISE_FEE);
         myWallet.receivePending(t1, null);
         Wallet wallet1 = roundTrip(myWallet);
-        Transaction t1copy = wallet1.getTransaction(t1.getHash());
+        Transaction t1copy = wallet1.getTransaction(t1.getTxId());
         assertEquals(Purpose.RAISE_FEE, t1copy.getPurpose());
     }
 
@@ -182,7 +187,7 @@ public class WalletProtobufSerializerTest {
         myWallet.receiveFromBlock(doubleSpends.t2, null, BlockChain.NewBlockType.BEST_CHAIN, 0);
         Wallet wallet1 = roundTrip(myWallet);
         assertEquals(1, wallet1.getTransactions(true).size());
-        Transaction t1 = wallet1.getTransaction(doubleSpends.t1.getHash());
+        Transaction t1 = wallet1.getTransaction(doubleSpends.t1.getTxId());
         assertEquals(ConfidenceType.DEAD, t1.getConfidence().getConfidenceType());
         assertEquals(Coin.ZERO, wallet1.getBalance());
 
@@ -195,11 +200,12 @@ public class WalletProtobufSerializerTest {
         for (int i = 0 ; i < 20 ; i++) {
             myKey = new ECKey();
             myAddress = LegacyAddress.fromKey(UNITTEST, myKey);
-            myWallet = new Wallet(UNITTEST);
+            myWallet = Wallet.createDeterministic(UNITTEST, Script.ScriptType.P2PKH);
             myWallet.importKey(myKey);
             Wallet wallet1 = roundTrip(myWallet);
-            assertArrayEquals(myKey.getPubKey(), wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getPubKey());
-            assertArrayEquals(myKey.getPrivKeyBytes(), wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getPrivKeyBytes());
+            ECKey foundKey = wallet1.findKeyFromPubKeyHash(myKey.getPubKeyHash(), null);
+            assertArrayEquals(myKey.getPubKey(), foundKey.getPubKey());
+            assertArrayEquals(myKey.getPrivKeyBytes(), foundKey.getPrivKeyBytes());
         }
     }
 
@@ -208,7 +214,7 @@ public class WalletProtobufSerializerTest {
         // Test the lastBlockSeenHash field works.
 
         // LastBlockSeenHash should be empty if never set.
-        Wallet wallet = new Wallet(UNITTEST);
+        Wallet wallet = Wallet.createDeterministic(UNITTEST, Script.ScriptType.P2PKH);
         Protos.Wallet walletProto = new WalletProtobufSerializer().walletToProto(wallet);
         ByteString lastSeenBlockHash = walletProto.getLastSeenBlockHash();
         assertTrue(lastSeenBlockHash.isEmpty());
@@ -234,7 +240,7 @@ public class WalletProtobufSerializerTest {
 
     @Test
     public void testSequenceNumber() throws Exception {
-        Wallet wallet = new Wallet(UNITTEST);
+        Wallet wallet = Wallet.createDeterministic(UNITTEST, Script.ScriptType.P2PKH);
         Transaction tx1 = createFakeTx(UNITTEST, Coin.COIN, wallet.currentReceiveAddress());
         tx1.getInput(0).setSequenceNumber(TransactionInput.NO_SEQUENCE);
         wallet.receivePending(tx1, null);
@@ -242,9 +248,9 @@ public class WalletProtobufSerializerTest {
         tx2.getInput(0).setSequenceNumber(TransactionInput.NO_SEQUENCE - 1);
         wallet.receivePending(tx2, null);
         Wallet walletCopy = roundTrip(wallet);
-        Transaction tx1copy = checkNotNull(walletCopy.getTransaction(tx1.getHash()));
+        Transaction tx1copy = checkNotNull(walletCopy.getTransaction(tx1.getTxId()));
         assertEquals(TransactionInput.NO_SEQUENCE, tx1copy.getInput(0).getSequenceNumber());
-        Transaction tx2copy = checkNotNull(walletCopy.getTransaction(tx2.getHash()));
+        Transaction tx2copy = checkNotNull(walletCopy.getTransaction(tx2.getTxId()));
         assertEquals(TransactionInput.NO_SEQUENCE - 1, tx2copy.getInput(0).getSequenceNumber());
     }
 
@@ -334,12 +340,10 @@ public class WalletProtobufSerializerTest {
         Wallet wallet1 = roundTrip(myWallet);
         assertEquals(0, wallet1.getTransactions(true).size());
         assertEquals(Coin.ZERO, wallet1.getBalance());
-        assertArrayEquals(myKey.getPubKey(),
-                wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getPubKey());
-        assertArrayEquals(myKey.getPrivKeyBytes(),
-                wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getPrivKeyBytes());
-        assertEquals(myKey.getCreationTimeSeconds(),
-                wallet1.findKeyFromPubHash(myKey.getPubKeyHash()).getCreationTimeSeconds());
+        ECKey foundKey = wallet1.findKeyFromPubKeyHash(myKey.getPubKeyHash(), null);
+        assertArrayEquals(myKey.getPubKey(), foundKey.getPubKey());
+        assertArrayEquals(myKey.getPrivKeyBytes(), foundKey.getPrivKeyBytes());
+        assertEquals(myKey.getCreationTimeSeconds(), foundKey.getCreationTimeSeconds());
     }
 
     @Test
@@ -361,8 +365,8 @@ public class WalletProtobufSerializerTest {
     @Test
     public void testRoundTripMarriedWallet() throws Exception {
         // create 2-of-2 married wallet
-        myWallet = new Wallet(UNITTEST);
-        final DeterministicKeyChain partnerChain = new DeterministicKeyChain(new SecureRandom());
+        myWallet = Wallet.createDeterministic(UNITTEST, Script.ScriptType.P2PKH);
+        final DeterministicKeyChain partnerChain = DeterministicKeyChain.builder().random(new SecureRandom()).build();
         DeterministicKey partnerKey = DeterministicKey.deserializeB58(null, partnerChain.getWatchingKey().serializePubB58(UNITTEST), UNITTEST);
         MarriedKeyChain chain = MarriedKeyChain.builder()
                 .random(new SecureRandom())
@@ -384,10 +388,10 @@ public class WalletProtobufSerializerTest {
         Transaction tx = new Transaction(UNITTEST, Utils.HEX.decode(
                 "0200000001d7902864af9310420c6e606b814c8f89f7902d40c130594e85df2e757a7cc301070000006b483045022100ca1757afa1af85c2bb014382d9ce411e1628d2b3d478df9d5d3e9e93cb25dcdd02206c5d272b31a23baf64e82793ee5c816e2bbef251e733a638b630ff2331fc83ba0121026ac2316508287761befbd0f7495ea794b396dbc5b556bf276639f56c0bd08911feffffff0274730700000000001976a91456da2d038a098c42390c77ef163e1cc23aedf24088ac91062300000000001976a9148ebf3467b9a8d7ae7b290da719e61142793392c188ac22e00600"));
         assertEquals(tx.getVersion(), 2);
-        assertEquals(tx.getHashAsString(), "0321b1413ed9048199815bd6bc2650cab1a9e8d543f109a42c769b1f18df4174");
+        assertEquals(tx.getTxId().toString(), "0321b1413ed9048199815bd6bc2650cab1a9e8d543f109a42c769b1f18df4174");
         myWallet.addWalletTransaction(new WalletTransaction(Pool.UNSPENT, tx));
         Wallet wallet1 = roundTrip(myWallet);
-        Transaction tx2 = wallet1.getTransaction(tx.getHash());
+        Transaction tx2 = wallet1.getTransaction(tx.getTxId());
         assertEquals(checkNotNull(tx2).getVersion(), 2);
     }
 
@@ -401,10 +405,10 @@ public class WalletProtobufSerializerTest {
         assertTrue(chain.add(b));
         // Wallet now has a coinbase tx in it.
         assertEquals(1, myWallet.getTransactions(true).size());
-        assertTrue(myWallet.getTransaction(coinbase.getHash()).isCoinBase());
+        assertTrue(myWallet.getTransaction(coinbase.getTxId()).isCoinBase());
         Wallet wallet2 = roundTrip(myWallet);
         assertEquals(1, wallet2.getTransactions(true).size());
-        assertTrue(wallet2.getTransaction(coinbase.getHash()).isCoinBase());
+        assertTrue(wallet2.getTransaction(coinbase.getTxId()).isCoinBase());
     }
 
     @Test
@@ -432,7 +436,7 @@ public class WalletProtobufSerializerTest {
         assertTrue(wallet.getExtensions().containsKey("com.whatever.required"));
 
         // Non-mandatory extensions are ignored if the wallet doesn't know how to read them.
-        Wallet wallet2 = new Wallet(UNITTEST);
+        Wallet wallet2 = Wallet.createDeterministic(UNITTEST, Script.ScriptType.P2PKH);
         wallet2.addExtension(new FooWalletExtension("com.whatever.optional", false));
         Protos.Wallet proto2 = new WalletProtobufSerializer().walletToProto(wallet2);
         Wallet wallet5 = new WalletProtobufSerializer().readWallet(UNITTEST, null, proto2);
@@ -481,10 +485,10 @@ public class WalletProtobufSerializerTest {
         Transaction tx = new Transaction(UNITTEST, Utils.HEX.decode(
                 "02000000000103fc8a5bea59392369e8a1b635395e507a5cbaeffd926e6967a00d17c669aef1d3010000001716001403c80a334ed6a92cf400d8c708522ea0d6fa5593ffffffffc0166d2218a2613b5384fc2c31238b1b6fa337080a1384220734e1bfd3629d3f0100000000ffffffffc0166d2218a2613b5384fc2c31238b1b6fa337080a1384220734e1bfd3629d3f0200000000ffffffff01a086010000000000220020eb72e573a9513d982a01f0e6a6b53e92764db81a0c26d2be94c5fc5b69a0db7d02473044022048e895b7af715303ce273a2be03d6110ed69b5700679f4f036000f8ba6eddd2802205f780423fcce9b3632ed41681b0a86f5d123766b71f303558c39c1be5fe43e2601210259eb16169df80dbe5856d082a226d84a97d191c895f8046c3544df525028a874000220c0166d2218a2613b5384fc2c31238b1b6fa337080a1384220734e1bfd3629d3f20c0166d2218a2613b5384fc2c31238b1b6fa337080a1384220734e1bfd3629d3f00000000"));
         assertTrue(tx.hasWitnesses());
-        assertEquals(tx.getHashAsString(), "1c687396f4710f26206dbdd8bf07a28c76398be6750226ddfaf05a1a80d30034");
+        assertEquals(tx.getTxId().toString(), "1c687396f4710f26206dbdd8bf07a28c76398be6750226ddfaf05a1a80d30034");
         myWallet.addWalletTransaction(new WalletTransaction(Pool.UNSPENT, tx));
         Wallet wallet1 = roundTrip(myWallet);
-        Transaction tx2 = wallet1.getTransaction(tx.getHash());
+        Transaction tx2 = wallet1.getTransaction(tx.getTxId());
         assertEquals(tx.getInput(0).getWitness(), tx2.getInput(0).getWitness());
     }
 }

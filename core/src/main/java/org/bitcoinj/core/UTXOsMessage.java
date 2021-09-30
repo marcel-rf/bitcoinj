@@ -16,7 +16,6 @@
 
 package org.bitcoinj.core;
 
-import com.google.common.base.Objects;
 import org.bitcoinj.net.discovery.HttpDiscovery;
 
 import java.io.IOException;
@@ -24,6 +23,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * <p>Message representing a list of unspent transaction outputs ("utxos"), returned in response to sending a
@@ -103,14 +103,14 @@ public class UTXOsMessage extends Message {
         //   vector<CCoin> outs;
         //
         // A CCoin is  { int nVersion, int nHeight, CTxOut output }
-        // The bitmap indicates which of the requested TXOs were found in the UTXO set.
+        // hitsBitmap indicates which of the queried outputs were found in the UTXO set.
         height = readUint32();
         chainHead = readHash();
-        int numBytes = (int) readVarInt();
+        int numBytes = readVarInt().intValue();
         if (numBytes < 0 || numBytes > InventoryMessage.MAX_INVENTORY_ITEMS / 8)
             throw new ProtocolException("hitsBitmap out of range: " + numBytes);
         hits = readBytes(numBytes);
-        int numOuts = (int) readVarInt();
+        int numOuts = readVarInt().intValue();
         if (numOuts < 0 || numOuts > InventoryMessage.MAX_INVENTORY_ITEMS)
             throw new ProtocolException("numOuts out of range: " + numOuts);
         outputs = new ArrayList<>(numOuts);
@@ -166,6 +166,6 @@ public class UTXOsMessage extends Message {
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(height, chainHead, Arrays.hashCode(heights), Arrays.hashCode(hits), outputs);
+        return Objects.hash(height, chainHead, Arrays.hashCode(heights), Arrays.hashCode(hits), outputs);
     }
 }

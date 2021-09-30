@@ -20,7 +20,6 @@ package org.bitcoinj.core;
 import com.google.common.collect.*;
 import com.google.common.util.concurrent.*;
 
-import org.bitcoinj.core.listeners.BlockChainListener;
 import org.bitcoinj.utils.*;
 import org.bitcoinj.wallet.CoinSelector;
 import org.bitcoinj.wallet.Wallet;
@@ -49,7 +48,7 @@ import static com.google.common.base.Preconditions.*;
  * <li>Receiving it from multiple peers on the network. If your network connection is not being intercepted,
  *     hearing about a transaction from multiple peers indicates the network has accepted the transaction and
  *     thus miners likely have too (miners have the final say in whether a transaction becomes valid or not).</li>
- * <li>Seeing the transaction appear appear in a block on the main chain. Your confidence increases as the transaction
+ * <li>Seeing the transaction appear in a block on the best chain. Your confidence increases as the transaction
  *     becomes further buried under work. Work can be measured either in blocks (roughly, units of time), or
  *     amount of work done.</li>
  * </ul>
@@ -62,6 +61,11 @@ import static com.google.common.base.Preconditions.*;
  * To make a copy that won't be changed, use {@link TransactionConfidence#duplicate()}.
  */
 public class TransactionConfidence {
+    public static class Factory {
+        public TransactionConfidence createConfidence(Sha256Hash hash) {
+            return new TransactionConfidence(hash);
+        }
+    }
 
     /**
      * The peers that have announced the transaction to us. Network nodes don't have stable identities, so we use
@@ -219,9 +223,9 @@ public class TransactionConfidence {
      *
      * <p>Note that this is NOT called when every block arrives. Instead it is called when the transaction
      * transitions between confidence states, ie, from not being seen in the chain to being seen (not necessarily in
-     * the best chain). If you want to know when the transaction gets buried under another block, implement a
-     * {@link BlockChainListener}, attach it to a {@link BlockChain} and then use the getters on the
-     * confidence object to determine the new depth.</p>
+     * the best chain). If you want to know when the transaction gets buried under another block, implement
+     * {@link org.bitcoinj.core.listeners.NewBestBlockListener} and related listeners, attach them to a
+     * {@link BlockChain} and then use the getters on the confidence object to determine the new depth.</p>
      */
     public void addEventListener(Listener listener) {
         addEventListener(Threading.USER_THREAD, listener);
@@ -313,8 +317,9 @@ public class TransactionConfidence {
      * Returns a snapshot of {@link PeerAddress}es that announced the transaction.
      */
     public Set<PeerAddress> getBroadcastBy() {
-        ListIterator<PeerAddress> iterator = broadcastBy.listIterator();
-        return Sets.newHashSet(iterator);
+        Set<PeerAddress> broadcastBySet = new HashSet<>();
+        Iterators.addAll(broadcastBySet, broadcastBy.listIterator());
+        return broadcastBySet;
     }
 
     /** Returns true if the given address has been seen via markBroadcastBy() */

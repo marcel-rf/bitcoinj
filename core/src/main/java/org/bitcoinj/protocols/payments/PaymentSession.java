@@ -210,9 +210,7 @@ public class PaymentSession {
         if (verifyPki) {
             try {
                 pkiVerificationData = PaymentProtocol.verifyPaymentRequestPki(request, nonNullTrustStoreLoader.getKeyStore());
-            } catch (IOException x) {
-                throw new PaymentProtocolException(x);
-            } catch (KeyStoreException x) {
+            } catch (IOException | KeyStoreException x) {
                 throw new PaymentProtocolException(x);
             }
         } else {
@@ -270,7 +268,7 @@ public class PaymentSession {
      * This should always be called before attempting to call sendPayment.
      */
     public boolean isExpired() {
-        return paymentDetails.hasExpires() && System.currentTimeMillis() / 1000L > paymentDetails.getExpires();
+        return paymentDetails.hasExpires() && Utils.currentTimeSeconds() > paymentDetails.getExpires();
     }
 
     /**

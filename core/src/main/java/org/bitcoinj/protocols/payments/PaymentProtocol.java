@@ -23,7 +23,6 @@ import org.bitcoinj.script.ScriptBuilder;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.bitcoin.protocols.payments.Protos;
@@ -186,7 +185,7 @@ public class PaymentProtocol {
             // The ordering of certificates is defined by the payment protocol spec to be the same as what the Java
             // crypto API requires - convenient!
             CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
-            certs = Lists.newArrayList();
+            certs = new ArrayList<>();
             for (ByteString bytes : protoCerts.getCertificateList())
                 certs.add((X509Certificate) certificateFactory.generateCertificate(bytes.newInput()));
             CertPath path = certificateFactory.generateCertPath(certs);
@@ -222,26 +221,18 @@ public class PaymentProtocol {
         } catch (InvalidProtocolBufferException e) {
             // Data structures are malformed.
             throw new PaymentProtocolException.InvalidPkiData(e);
-        } catch (CertificateException e) {
-            // The X.509 certificate data didn't parse correctly.
+        } catch (CertificateException | SignatureException | InvalidKeyException e) {
+            // CertificateException: The X.509 certificate data didn't parse correctly.
+            // SignatureException: Something went wrong during hashing (yes, despite the name, this does not mean the sig was invalid).
+            // InvalidKeyException: Shouldn't happen if the certs verified correctly.
             throw new PaymentProtocolException.PkiVerificationException(e);
-        } catch (NoSuchAlgorithmException e) {
-            // Should never happen so don't make users have to think about it. PKIX is always present.
-            throw new RuntimeException(e);
-        } catch (InvalidAlgorithmParameterException e) {
+        } catch (NoSuchAlgorithmException | KeyStoreException | InvalidAlgorithmParameterException e) {
+            // NoSuchAlgorithmException: Should never happen so don't make users have to think about it. PKIX is always present.
             throw new RuntimeException(e);
         } catch (CertPathValidatorException e) {
             // The certificate chain isn't known or trusted, probably, the server is using an SSL root we don't
             // know about and the user needs to upgrade to a new version of the software (or import a root cert).
             throw new PaymentProtocolException.PkiVerificationException(e, certs);
-        } catch (InvalidKeyException e) {
-            // Shouldn't happen if the certs verified correctly.
-            throw new PaymentProtocolException.PkiVerificationException(e);
-        } catch (SignatureException e) {
-            // Something went wrong during hashing (yes, despite the name, this does not mean the sig was invalid).
-            throw new PaymentProtocolException.PkiVerificationException(e);
-        } catch (KeyStoreException e) {
-            throw new RuntimeException(e);
         }
     }
 

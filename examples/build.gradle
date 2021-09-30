@@ -1,11 +1,16 @@
-apply plugin: 'java'
+plugins {
+    id 'java'
+    id 'eclipse'
+}
 
 dependencies {
-    implementation project(':core')
-    implementation 'com.google.guava:guava:24.0-android'
-    implementation 'net.sf.jopt-simple:jopt-simple:4.3'
-    implementation 'org.slf4j:slf4j-jdk14:1.7.25'
+    implementation project(':bitcoinj-core')
+    implementation 'info.picocli:picocli:4.6.1'
+    implementation 'org.slf4j:slf4j-jdk14:1.7.32'
     implementation 'org.fusesource.leveldbjni:leveldbjni-all:1.8'
 }
 
 sourceCompatibility = 1.8
+compileJava.options.encoding = 'UTF-8'
+compileTestJava.options.encoding = 'UTF-8'
+javadoc.options.encoding = 'UTF-8'

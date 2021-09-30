@@ -1,5 +1,6 @@
 /*
  * Copyright 2013 Google Inc.
+ * Copyright 2019 Andreas Schildbach
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +19,15 @@ package org.bitcoinj.wallet;
 
 import org.bitcoinj.core.BloomFilter;
 import org.bitcoinj.core.ECKey;
+import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.crypto.*;
 import org.bitcoinj.utils.ListenerRegistration;
 import org.bitcoinj.utils.Threading;
 import org.bitcoinj.wallet.listeners.KeyChainEventListener;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
-import org.spongycastle.crypto.params.KeyParameter;
+import org.bouncycastle.crypto.params.KeyParameter;
 
 import javax.annotation.Nullable;
 import java.util.*;
@@ -42,9 +43,9 @@ import static com.google.common.base.Preconditions.*;
  * it will automatically add one to itself if it's empty or if encryption is requested.
  */
 public class BasicKeyChain implements EncryptableKeyChain {
-    private final ReentrantLock lock = Threading.lock("BasicKeyChain");
+    private final ReentrantLock lock = Threading.lock(BasicKeyChain.class);
 
-    // Maps used to let us quickly look up a key given data we find in transcations or the block chain.
+    // Maps used to let us quickly look up a key given data we find in transactions or the block chain.
     private final LinkedHashMap<ByteString, ECKey> hashToKeys;
     private final LinkedHashMap<ByteString, ECKey> pubkeyToKeys;
     @Nullable private final KeyCrypter keyCrypter;
@@ -203,19 +204,19 @@ public class BasicKeyChain implements EncryptableKeyChain {
         }
     }
 
-    public ECKey findKeyFromPubHash(byte[] pubkeyHash) {
+    public ECKey findKeyFromPubHash(byte[] pubKeyHash) {
         lock.lock();
         try {
-            return hashToKeys.get(ByteString.copyFrom(pubkeyHash));
+            return hashToKeys.get(ByteString.copyFrom(pubKeyHash));
         } finally {
             lock.unlock();
         }
     }
 
-    public ECKey findKeyFromPubKey(byte[] pubkey) {
+    public ECKey findKeyFromPubKey(byte[] pubKey) {
         lock.lock();
         try {
-            return pubkeyToKeys.get(ByteString.copyFrom(pubkey));
+            return pubkeyToKeys.get(ByteString.copyFrom(pubKey));
         } finally {
             lock.unlock();
         }
@@ -319,9 +320,9 @@ public class BasicKeyChain implements EncryptableKeyChain {
             // which the leaf keys chain to an encrypted parent and rederive their private keys on the fly. In that
             // case the caller in DeterministicKeyChain will take care of setting the type.
             EncryptedData data = item.getEncryptedData();
-            proto.getEncryptedDataBuilder()
+            proto.setEncryptedData(proto.getEncryptedData().toBuilder()
                     .setEncryptedPrivateKey(ByteString.copyFrom(data.encryptedBytes))
-                    .setInitialisationVector(ByteString.copyFrom(data.initialisationVector));
+                    .setInitialisationVector(ByteString.copyFrom(data.initialisationVector)));
             // We don't allow mixing of encryption types at the moment.
             checkState(item.getEncryptionType() == Protos.Wallet.EncryptionType.ENCRYPTED_SCRYPT_AES);
             proto.setType(Protos.Key.Type.ENCRYPTED_SCRYPT_AES);
@@ -407,7 +408,11 @@ public class BasicKeyChain implements EncryptableKeyChain {
 
     @Override
     public void addEventListener(KeyChainEventListener listener, Executor executor) {
-        listeners.add(new ListenerRegistration<>(listener, executor));
+        addEventListener(new ListenerRegistration<>(listener, executor));
+    }
+
+    /* package private */ void addEventListener(ListenerRegistration<KeyChainEventListener> listener) {
+        listeners.add(listener);
     }
 
     @Override
@@ -435,7 +440,7 @@ public class BasicKeyChain implements EncryptableKeyChain {
 
     /**
      * Convenience wrapper around {@link #toEncrypted(KeyCrypter,
-     * org.spongycastle.crypto.params.KeyParameter)} which uses the default Scrypt key derivation algorithm and
+     * org.bouncycastle.crypto.params.KeyParameter)} which uses the default Scrypt key derivation algorithm and
      * parameters, derives a key from the given password and returns the created key.
      */
     @Override
@@ -474,6 +479,9 @@ public class BasicKeyChain implements EncryptableKeyChain {
                     throw new KeyCrypterException("The key " + key.toString() + " cannot be successfully decrypted after encryption so aborting wallet encryption.");
                 encrypted.importKeyLocked(encryptedKey);
             }
+            for (ListenerRegistration<KeyChainEventListener> listener : listeners) {
+                encrypted.addEventListener(listener);
+            }
             return encrypted;
         } finally {
             lock.unlock();
@@ -498,6 +506,9 @@ public class BasicKeyChain implements EncryptableKeyChain {
             BasicKeyChain decrypted = new BasicKeyChain();
             for (ECKey key : hashToKeys.values()) {
                 decrypted.importKeyLocked(key.decrypt(aesKey));
+            }
+            for (ListenerRegistration<KeyChainEventListener> listener : listeners) {
+                decrypted.addEventListener(listener);
             }
             return decrypted;
         } finally {
@@ -606,7 +617,7 @@ public class BasicKeyChain implements EncryptableKeyChain {
     public List<ECKey> findKeysBefore(long timeSecs) {
         lock.lock();
         try {
-            List<ECKey> results = Lists.newLinkedList();
+            List<ECKey> results = new LinkedList<>();
             for (ECKey key : hashToKeys.values()) {
                 final long keyTime = key.getCreationTimeSeconds();
                 if (keyTime < timeSecs) {
@@ -617,5 +628,14 @@ public class BasicKeyChain implements EncryptableKeyChain {
         } finally {
             lock.unlock();
         }
+    }
+
+    public String toString(boolean includePrivateKeys, @Nullable KeyParameter aesKey, NetworkParameters params) {
+        final StringBuilder builder = new StringBuilder();
+        List<ECKey> keys = getKeys();
+        Collections.sort(keys, ECKey.AGE_COMPARATOR);
+        for (ECKey key : keys)
+            key.formatKeyWithAddress(includePrivateKeys, aesKey, builder, params, null, "imported");
+        return builder.toString();
     }
 }

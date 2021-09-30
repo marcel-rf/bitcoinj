@@ -20,7 +20,7 @@ import org.bitcoinj.utils.BtcAutoFormat.Style;
 import static org.bitcoinj.utils.BtcAutoFormat.Style.*;
 
 import org.bitcoinj.core.Coin;
-import com.google.common.base.Objects;
+import java.util.Objects;
 import com.google.common.collect.ImmutableList;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -65,7 +65,7 @@ import java.util.regex.Pattern;
  *   <li>access to character information that allows for vertical
  *       alignment of tabular columns of formatted values.</ol>
  *
- * <h3>Basic Usage</h3>
+ * <h2>Basic Usage</h2>
  *
  * <p>Basic usage is very simple:</p>
  *
@@ -87,13 +87,13 @@ import java.util.regex.Pattern;
  * Coin all = f.parseObject("M฿ 21");             <strong>// All the money in the world</strong>
  * </pre></blockquote>
  *
- * <h3>Auto-Denomination versus Fixed-Denomination</h3>
+ * <h2>Auto-Denomination versus Fixed-Denomination</h2>
  *
  * <p>There are two provided concrete classes, one that automatically denominates values to
  * be formatted, {@link BtcAutoFormat}, and another that formats any value in units of a
  * fixed, specified denomination, {@link BtcFixedFormat}.</p>
  *
- * <h4>Automatic Denomination</h4>
+ * <h3>Automatic Denomination</h3>
  *
  * <p>Automatic denomination means that the formatter adjusts the denominational units in which a
  * formatted number is expressed based on the monetary value that number represents.  An
@@ -111,7 +111,7 @@ import java.util.regex.Pattern;
  * locale, a value of one bitcoin might be formatted as {@code ฿1.00} where a value
  * exceeding that by one satoshi would be {@code µ฿1,000,000.01}</p>
  *
- * <h4>Fixed Denomination</h4>
+ * <h3>Fixed Denomination</h3>
  * 
  * <p>Fixed denomination means that the same denomination of units is used for every value that is
  * formatted or parsed by a given formatter instance.  A fixed-denomination formatter is
@@ -122,7 +122,7 @@ import java.util.regex.Pattern;
  * {@code 1.0000 BTC}, or one bitcoin, in millibitcoins, one shifts the decimal point
  * three places, that is, to {@code 1000.0 mBTC}.</p>
  *
- * <h3>Construction</h3>
+ * <h2>Construction</h2>
  *
  * <p>There are two ways to obtain an instance of this class:</p>
  *
@@ -136,7 +136,7 @@ import java.util.regex.Pattern;
  * access to some features not available through the factory methods,
  * such as using custom formatting patterns and currency symbols.</p>
  *
- * <h4>Factory Methods</h4>
+ * <h3>Factory Methods</h3>
  *
  * <p>Although formatting and parsing is performed by one of the concrete
  * subclasses, you can obtain formatters using the various static factory
@@ -233,7 +233,7 @@ import java.util.regex.Pattern;
  * fractional quantity of satoshis, and these defaults can be overridden by arguments to the
  * {@code format()} method.  See below for examples.</p>
  *
- * <h4>The {@link Builder} Class</h4>
+ * <h3>The {@link Builder} Class</h3>
  *
  * <p>A new {@link BtcFormat.Builder} instance is returned by the {@link #builder()} method.  Such
  * an object has methods that set the configuration parameters of a {@link BtcFormat}
@@ -264,7 +264,7 @@ import java.util.regex.Pattern;
  *
  * <p>See the documentation of the {@link BtcFormat.Builder} class for details.</p>
  *
- * <h3>Formatting</h3>
+ * <h2>Formatting</h2>
  *
  * <p>You format a Bitcoin monetary value by passing it to the {@link BtcFormat#format(Object)}
  * method.  This argument can be either a {@link Coin}-type object or a
@@ -350,7 +350,7 @@ import java.util.regex.Pattern;
  * BtcFormat(4).code(); <strong>// unnamed denomination has no code; raises exception</strong>
  * </pre></blockquote>
  *
- * <h4>Formatting for Tabular Columns</h4>
+ * <h3>Formatting for Tabular Columns</h3>
  *
  * <p>When displaying tables of monetary values, you can lessen the
  * risk of human misreading-error by vertically aligning the decimal
@@ -396,7 +396,7 @@ import java.util.regex.Pattern;
  * then see the documentation for the {@link NumberFormat} class
  * for an explanation of how to do that.</p>
  *
- * <h3>Parsing</h3>
+ * <h2>Parsing</h2>
  *
  * <p>The {@link #parse(String)} method accepts a {@link String} argument, and returns a
  * {@link Coin}-type value.  The difference in parsing behavior between instances of {@link
@@ -443,9 +443,9 @@ import java.util.regex.Pattern;
  * raise a {@code ParseException}, as will any other detected
  * parsing error.</p>
  *
- *  <h3>Limitations</h3>
+ *  <h2>Limitations</h2>
  *
- *  <h4>Parsing</h4>
+ *  <h3>Parsing</h3>
  *
  * <p>Parsing is performed by an underlying {@link NumberFormat} object. While this
  * delivers the benefit of recognizing locale-specific patterns, some have criticized other
@@ -455,13 +455,13 @@ import java.util.regex.Pattern;
  * input from end-users, then you should consider whether you would benefit from any of the
  * work-arounds mentioned in that article.</p>
  *
- * <h4>Exotic Locales</h4>
+ * <h3>Exotic Locales</h3>
  *
  * <p>This class is not well-tested in locales that use non-ascii
  * character sets, especially those where writing proceeds from
  * right-to-left.  Helpful feedback in that regard is appreciated.</p>
  *
- * <h3>Thread-Safety</h3>
+ * <h2>Thread-Safety</h2>
  *
  * <p>Instances of this class are immutable.</p>
  *
@@ -533,7 +533,7 @@ public abstract class BtcFormat extends Format {
      * <p>This class constructs new instances of {@link BtcFormat}, allowing for the
      * configuration of those instances before they are constructed.  After obtaining a
      * {@code Builder} object from the {@link BtcFormat#builder()} method, invoke the
-     * necessary setter methods to obtain your desired configuration.  Finaly, the {@link
+     * necessary setter methods to obtain your desired configuration.  Finally, the {@link
      * #build()} method returns a new {@code BtcFormat} object that has the specified
      * configuration.
      *
@@ -809,7 +809,7 @@ public abstract class BtcFormat extends Format {
      * locale.
      */
     public static BtcFormat getCodeInstance(int minDecimals) {
-	return getCodeInstance(defaultLocale(), minDecimals);
+        return getCodeInstance(defaultLocale(), minDecimals);
     }
 
     /**
@@ -835,7 +835,7 @@ public abstract class BtcFormat extends Format {
      * fractional satoshis.
      */
     public static BtcFormat getInstance(Locale locale, int minDecimals) {
-	return getCodeInstance(locale, minDecimals);
+        return getCodeInstance(locale, minDecimals);
     }
 
     /**
@@ -847,7 +847,7 @@ public abstract class BtcFormat extends Format {
      * fractional satoshis.
      */
     public static BtcFormat getCodeInstance(Locale locale, int minDecimals) {
-	return getInstance(CODE, locale, minDecimals);
+        return getInstance(CODE, locale, minDecimals);
     }
 
     /**
@@ -856,7 +856,7 @@ public abstract class BtcFormat extends Format {
      * units using a currency symbol, for example, {@code "µ฿"}.
      */
     public static BtcFormat getSymbolInstance(Locale locale) {
-	return getInstance(SYMBOL, locale);
+        return getInstance(SYMBOL, locale);
     }
 
     /**
@@ -868,7 +868,7 @@ public abstract class BtcFormat extends Format {
      * fractional satoshis.
      */
     public static BtcFormat getSymbolInstance(Locale locale, int fractionPlaces) {
-	return getInstance(SYMBOL, locale, fractionPlaces);
+        return getInstance(SYMBOL, locale, fractionPlaces);
     }
 
     /**
@@ -889,7 +889,7 @@ public abstract class BtcFormat extends Format {
      * parsing will be done according to the default locale.
      */
     public static BtcFormat getInstance(Style style, int fractionPlaces) {
-	return getInstance(style, defaultLocale(), fractionPlaces);
+        return getInstance(style, defaultLocale(), fractionPlaces);
     }
 
     /**
@@ -902,7 +902,7 @@ public abstract class BtcFormat extends Format {
      * as necessary to avoid giving a place to fractional satoshis.
      */
     public static BtcFormat getInstance(Style style, Locale locale) {
-	return getInstance(style, locale, 2);
+        return getInstance(style, locale, 2);
     }
 
     /**
@@ -914,11 +914,11 @@ public abstract class BtcFormat extends Format {
      * according to the given locale.
      *
      * <p>The third parameter is the number of fractional decimal places to use for each
-     * formatted number, reduced as neccesary when formatting to avoid giving a place to
+     * formatted number, reduced as necessary when formatting to avoid giving a place to
      * fractional satoshis.
      */
     public static BtcFormat getInstance(Style style, Locale locale, int fractionPlaces) {
-	return new BtcAutoFormat(locale, style, fractionPlaces);
+        return new BtcAutoFormat(locale, style, fractionPlaces);
     }
 
     /**
@@ -1050,7 +1050,7 @@ public abstract class BtcFormat extends Format {
     }
 
     /**
-     * Return a new fixeed-denomination formatter with the specified fractional decimal
+     * Return a new fixed-denomination formatter with the specified fractional decimal
      * placing.  The first argument specifies the denomination as the size of the
      * shift from coin-denomination in increasingly-precise decimal places.  The returned object will format
      * and parse values according to the default locale, and will format the fractional part of
@@ -1064,7 +1064,7 @@ public abstract class BtcFormat extends Format {
     }
 
     /**
-     * Return a new fixeed-denomination formatter.  The argument specifies the denomination as
+     * Return a new fixed-denomination formatter.  The argument specifies the denomination as
      * the size of the shift from coin-denomination in increasingly-precise decimal places.
      * The returned object will format and parse values according to the default locale, and
      * will format the fractional part of numbers with two decimal places, or fewer as
@@ -1075,7 +1075,7 @@ public abstract class BtcFormat extends Format {
     }
 
     /**
-     * Return a new fixeed-denomination formatter for the given locale.  The first argument
+     * Return a new fixed-denomination formatter for the given locale.  The first argument
      * specifies the denomination as the size of the shift from coin-denomination in
      * increasingly-precise decimal places.  The returned object will format and parse values
      * according to the locale specified by the second argument, and will format the fractional
@@ -1131,7 +1131,7 @@ public abstract class BtcFormat extends Format {
         AttributedCharacterIterator i = numberFormat.formatToCharacterIterator(units);
         numberFormat.setDecimalFormatSymbols(anteSigns);
         setFormatterDigits(numberFormat, anteDigits.get(0), anteDigits.get(1));
-	return i;
+        return i;
     }}
 
     /**
@@ -1247,7 +1247,7 @@ public abstract class BtcFormat extends Format {
     }
 
     /** Return the number of fractional decimal places to be displayed when formatting
-     *  the given number of monetory units of the denomination indicated by the given decimal scale value,
+     *  the given number of monetary units of the denomination indicated by the given decimal scale value,
      *  where 0 = coin, 3 = millicoin, and so on.
      *
      *  @param unitCount      the number of monetary units to be formatted
@@ -1282,19 +1282,19 @@ public abstract class BtcFormat extends Format {
      * client is permitted to pass us, and return a BigInteger representing the
      * number of satoshis having the equivalent value. */
     private static BigInteger inSatoshis(Object qty) {
-	BigInteger satoshis;
+        BigInteger satoshis;
         // the value might be bitcoins or satoshis
-	if (qty instanceof Long || qty instanceof Integer)
-	    satoshis = BigInteger.valueOf(((Number)qty).longValue());
-	else if (qty instanceof BigInteger)
-	    satoshis = (BigInteger)qty;
-	else if (qty instanceof BigDecimal)
-	    satoshis = ((BigDecimal)qty).movePointRight(Coin.SMALLEST_UNIT_EXPONENT).
+        if (qty instanceof Long || qty instanceof Integer)
+            satoshis = BigInteger.valueOf(((Number)qty).longValue());
+        else if (qty instanceof BigInteger)
+            satoshis = (BigInteger)qty;
+        else if (qty instanceof BigDecimal)
+            satoshis = ((BigDecimal)qty).movePointRight(Coin.SMALLEST_UNIT_EXPONENT).
                        setScale(0,BigDecimal.ROUND_HALF_UP).unscaledValue();
-	else if (qty instanceof Coin)
-	    satoshis = BigInteger.valueOf(((Coin)qty).value);
-	else
-	    throw new IllegalArgumentException("Cannot format a " + qty.getClass().getSimpleName() +
+        else if (qty instanceof Coin)
+            satoshis = BigInteger.valueOf(((Coin)qty).value);
+        else
+            throw new IllegalArgumentException("Cannot format a " + qty.getClass().getSimpleName() +
                                                " as a Bicoin value");
         return satoshis;
     }
@@ -1526,7 +1526,7 @@ public abstract class BtcFormat extends Format {
     public static Locale[] getAvailableLocales() { return NumberFormat.getAvailableLocales(); }
 
     /** Return the unprefixed currency symbol for bitcoins configured for this object.  The
-     *  return value of this method is constant throughough the life of an instance.  */
+     *  return value of this method is constant throughout the life of an instance.  */
     public String coinSymbol() { synchronized(numberFormat) {
         return numberFormat.getDecimalFormatSymbols().getCurrencySymbol();
     }}
@@ -1588,7 +1588,7 @@ public abstract class BtcFormat extends Format {
      *  @see java.lang.Object#hashCode
      */
     @Override public int hashCode() {
-        return Objects.hashCode(pattern(), symbols(), minimumFractionDigits, decimalGroups);
+        return Objects.hash(pattern(), symbols(), minimumFractionDigits, decimalGroups);
     }
 
 }

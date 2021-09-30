@@ -17,7 +17,8 @@
 package org.bitcoinj.wallet;
 
 import org.bitcoinj.core.ECKey;
-import org.spongycastle.crypto.params.KeyParameter;
+import org.bitcoinj.script.Script;
+import org.bouncycastle.crypto.params.KeyParameter;
 
 import javax.annotation.Nullable;
 
@@ -63,14 +64,14 @@ public class DecryptingKeyBag implements KeyBag {
 
     @Nullable
     @Override
-    public ECKey findKeyFromPubHash(byte[] pubkeyHash) {
-        return maybeDecrypt(target.findKeyFromPubHash(pubkeyHash));
+    public ECKey findKeyFromPubKeyHash(byte[] pubKeyHash, @Nullable Script.ScriptType scriptType) {
+        return maybeDecrypt(target.findKeyFromPubKeyHash(pubKeyHash, scriptType));
     }
 
     @Nullable
     @Override
-    public ECKey findKeyFromPubKey(byte[] pubkey) {
-        return maybeDecrypt(target.findKeyFromPubKey(pubkey));
+    public ECKey findKeyFromPubKey(byte[] pubKey) {
+        return maybeDecrypt(target.findKeyFromPubKey(pubKey));
     }
 
     @Nullable

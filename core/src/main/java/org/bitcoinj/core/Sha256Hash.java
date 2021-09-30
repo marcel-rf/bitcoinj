@@ -32,8 +32,10 @@ import java.util.Arrays;
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**
- * A Sha256Hash just wraps a byte[] so that equals and hashcode work correctly, allowing it to be used as keys in a
- * map. It also checks that the length is correct and provides a bit more type safety.
+ * A {@code Sha256Hash} wraps a {@code byte[]} so that {@link #equals} and {@link #hashCode} work correctly, allowing it to be used as a key in a
+ * map. It also checks that the {@code length} is correct (equal to {@link #LENGTH}) and provides a bit more type safety.
+ * <p>
+ * Given that {@code Sha256Hash} instances can be created using {@link #wrapReversed(byte[])} or {@link #twiceOf(byte[])} or by wrapping raw bytes, there is no guarantee that if two {@code Sha256Hash} instances are found equal (via {@link #equals(Object)}) that their preimages would be the same (even in the absence of a hash collision.)
  */
 public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
     public static final int LENGTH = 32; // bytes
@@ -41,22 +43,9 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
 
     private final byte[] bytes;
 
-    /**
-     * Use {@link #wrap(byte[])} instead.
-     */
-    @Deprecated
-    public Sha256Hash(byte[] rawHashBytes) {
+    private Sha256Hash(byte[] rawHashBytes) {
         checkArgument(rawHashBytes.length == LENGTH);
         this.bytes = rawHashBytes;
-    }
-
-    /**
-     * Use {@link #wrap(String)} instead.
-     */
-    @Deprecated
-    public Sha256Hash(String hexString) {
-        checkArgument(hexString.length() == LENGTH * 2);
-        this.bytes = Utils.HEX.decode(hexString);
     }
 
     /**
@@ -66,7 +55,6 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
      * @return a new instance
      * @throws IllegalArgumentException if the given array length is not exactly 32
      */
-    @SuppressWarnings("deprecation") // the constructor will be made private in the future
     public static Sha256Hash wrap(byte[] rawHashBytes) {
         return new Sha256Hash(rawHashBytes);
     }
@@ -90,15 +78,8 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
      * @return a new instance
      * @throws IllegalArgumentException if the given array length is not exactly 32
      */
-    @SuppressWarnings("deprecation") // the constructor will be made private in the future
     public static Sha256Hash wrapReversed(byte[] rawHashBytes) {
         return wrap(Utils.reverseBytes(rawHashBytes));
-    }
-
-    /** Use {@link #of(byte[])} instead: this old name is ambiguous. */
-    @Deprecated
-    public static Sha256Hash create(byte[] contents) {
-        return of(contents);
     }
 
     /**
@@ -109,12 +90,6 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
      */
     public static Sha256Hash of(byte[] contents) {
         return wrap(hash(contents));
-    }
-
-    /** Use {@link #twiceOf(byte[])} instead: this old name is ambiguous. */
-    @Deprecated
-    public static Sha256Hash createDouble(byte[] contents) {
-        return twiceOf(contents);
     }
 
     /**
@@ -128,6 +103,17 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
     }
 
     /**
+     * Creates a new instance containing the hash of the calculated hash of the given bytes.
+     *
+     * @param content1 first bytes on which the hash value is calculated
+     * @param content2 second bytes on which the hash value is calculated
+     * @return a new instance containing the calculated (two-time) hash
+     */
+    public static Sha256Hash twiceOf(byte[] content1, byte[] content2) {
+        return wrap(hashTwice(content1, content2));
+    }
+
+    /**
      * Creates a new instance containing the calculated (one-time) hash of the given file's contents.
      *
      * The file contents are read fully into memory, so this method should only be used with small files.
@@ -137,11 +123,8 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
      * @throws IOException if an error occurs while reading the file
      */
     public static Sha256Hash of(File file) throws IOException {
-        FileInputStream in = new FileInputStream(file);
-        try {
+        try (FileInputStream in = new FileInputStream(file)) {
             return of(ByteStreams.toByteArray(in));
-        } finally {
-            in.close();
         }
     }
 
@@ -194,6 +177,17 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
      */
     public static byte[] hashTwice(byte[] input) {
         return hashTwice(input, 0, input.length);
+    }
+
+    /**
+     * Calculates the hash of hash on the given chunks of bytes. This is equivalent to concatenating the two
+     * chunks and then passing the result to {@link #hashTwice(byte[])}.
+     */
+    public static byte[] hashTwice(byte[] input1, byte[] input2) {
+        MessageDigest digest = newDigest();
+        digest.update(input1);
+        digest.update(input2);
+        return digest.digest(digest.digest());
     }
 
     /**

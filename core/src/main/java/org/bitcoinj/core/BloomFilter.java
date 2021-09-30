@@ -21,14 +21,14 @@ import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptChunk;
 import org.bitcoinj.script.ScriptPattern;
 
-import com.google.common.base.Objects;
-import com.google.common.collect.Lists;
+import com.google.common.base.MoreObjects;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.Math.*;
@@ -131,7 +131,11 @@ public class BloomFilter extends Message {
 
     @Override
     public String toString() {
-        return "Bloom Filter of size " + data.length + " with " + hashFuncs + " hash functions.";
+        final MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(this).omitNullValues();
+        helper.add("data length", data.length);
+        helper.add("hashFuncs", hashFuncs);
+        helper.add("nFlags", getUpdateFlag());
+        return helper.toString();
     }
 
     @Override
@@ -242,6 +246,11 @@ public class BloomFilter extends Message {
         insert(key.getPubKeyHash());
     }
 
+    /** Inserts the given transaction outpoint. */
+    public synchronized void insert(TransactionOutPoint outpoint) {
+        insert(outpoint.unsafeBitcoinSerialize());
+    }
+
     /**
      * Sets this filter to match all objects. A Bloom filter which matches everything may seem pointless, however,
      * it is useful in order to reduce steady state bandwidth usage when you want full blocks. Instead of receiving
@@ -304,11 +313,11 @@ public class BloomFilter extends Message {
     public synchronized FilteredBlock applyAndUpdate(Block block) {
         List<Transaction> txns = block.getTransactions();
         List<Sha256Hash> txHashes = new ArrayList<>(txns.size());
-        List<Transaction> matched = Lists.newArrayList();
+        List<Transaction> matched = new ArrayList<>();
         byte[] bits = new byte[(int) Math.ceil(txns.size() / 8.0)];
         for (int i = 0; i < txns.size(); i++) {
             Transaction tx = txns.get(i);
-            txHashes.add(tx.getHash());
+            txHashes.add(tx.getTxId());
             if (applyAndUpdate(tx)) {
                 Utils.setBitLE(bits, i);
                 matched.add(tx);
@@ -322,7 +331,7 @@ public class BloomFilter extends Message {
     }
 
     public synchronized boolean applyAndUpdate(Transaction tx) {
-        if (contains(tx.getHash().getBytes()))
+        if (contains(tx.getTxId().getBytes()))
             return true;
         boolean found = false;
         BloomUpdate flag = getUpdateFlag();
@@ -332,9 +341,9 @@ public class BloomFilter extends Message {
                 if (!chunk.isPushData())
                     continue;
                 if (contains(chunk.data)) {
-                    boolean isSendingToPubKeys = ScriptPattern.isPayToPubKey(script) || ScriptPattern.isSentToMultisig(script);
+                    boolean isSendingToPubKeys = ScriptPattern.isP2PK(script) || ScriptPattern.isSentToMultisig(script);
                     if (flag == BloomUpdate.UPDATE_ALL || (flag == BloomUpdate.UPDATE_P2PUBKEY_ONLY && isSendingToPubKeys))
-                        insert(output.getOutPointFor().unsafeBitcoinSerialize());
+                        insert(output.getOutPointFor());
                     found = true;
                 }
             }
@@ -362,6 +371,6 @@ public class BloomFilter extends Message {
 
     @Override
     public synchronized int hashCode() {
-        return Objects.hashCode(hashFuncs, nTweak, Arrays.hashCode(data));
+        return Objects.hash(hashFuncs, nTweak, Arrays.hashCode(data));
     }
 }

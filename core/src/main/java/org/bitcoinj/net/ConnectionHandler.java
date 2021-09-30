@@ -16,9 +16,11 @@
 
 package org.bitcoinj.net;
 
+import com.google.common.base.Throwables;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import org.bitcoinj.core.Message;
 import org.bitcoinj.utils.Threading;
-import com.google.common.base.Throwables;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
@@ -45,15 +47,15 @@ import static com.google.common.base.Preconditions.checkState;
  */
 class ConnectionHandler implements MessageWriteTarget {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(ConnectionHandler.class);
+    // We lock when touching local flags and when writing data, but NEVER when calling any methods which leave this
+    // class into non-Java classes.
+    private final ReentrantLock lock = Threading.lock(ConnectionHandler.class);
 
     private static final int BUFFER_SIZE_LOWER_BOUND = 4096;
     private static final int BUFFER_SIZE_UPPER_BOUND = 65536;
 
     private static final int OUTBOUND_BUFFER_BYTE_COUNT = Message.MAX_SIZE + 24; // 24 byte message header
 
-    // We lock when touching local flags and when writing data, but NEVER when calling any methods which leave this
-    // class into non-Java classes.
-    private final ReentrantLock lock = Threading.lock("nioConnectionHandler");
     @GuardedBy("lock") private final ByteBuffer readBuff;
     @GuardedBy("lock") private final SocketChannel channel;
     @GuardedBy("lock") private final SelectionKey key;
@@ -61,7 +63,17 @@ class ConnectionHandler implements MessageWriteTarget {
     @GuardedBy("lock") private boolean closeCalled = false;
 
     @GuardedBy("lock") private long bytesToWriteRemaining = 0;
-    @GuardedBy("lock") private final LinkedList<ByteBuffer> bytesToWrite = new LinkedList<>();
+    @GuardedBy("lock") private final LinkedList<BytesAndFuture> bytesToWrite = new LinkedList<>();
+
+    private static class BytesAndFuture {
+        public final ByteBuffer bytes;
+        public final SettableFuture future;
+
+        public BytesAndFuture(ByteBuffer bytes, SettableFuture future) {
+            this.bytes = bytes;
+            this.future = future;
+        }
+    }
 
     private Set<ConnectionHandler> connectedHandlers;
 
@@ -113,13 +125,14 @@ class ConnectionHandler implements MessageWriteTarget {
         lock.lock();
         try {
             // Iterate through the outbound ByteBuff queue, pushing as much as possible into the OS' network buffer.
-            Iterator<ByteBuffer> bytesIterator = bytesToWrite.iterator();
-            while (bytesIterator.hasNext()) {
-                ByteBuffer buff = bytesIterator.next();
-                bytesToWriteRemaining -= channel.write(buff);
-                if (!buff.hasRemaining())
-                    bytesIterator.remove();
-                else {
+            Iterator<BytesAndFuture> iterator = bytesToWrite.iterator();
+            while (iterator.hasNext()) {
+                BytesAndFuture bytesAndFuture = iterator.next();
+                bytesToWriteRemaining -= channel.write(bytesAndFuture.bytes);
+                if (!bytesAndFuture.bytes.hasRemaining()) {
+                    iterator.remove();
+                    bytesAndFuture.future.set(null);
+                } else {
                     setWriteOps();
                     break;
                 }
@@ -134,7 +147,7 @@ class ConnectionHandler implements MessageWriteTarget {
     }
 
     @Override
-    public void writeBytes(byte[] message) throws IOException {
+    public ListenableFuture writeBytes(byte[] message) throws IOException {
         boolean andUnlock = true;
         lock.lock();
         try {
@@ -147,9 +160,11 @@ class ConnectionHandler implements MessageWriteTarget {
                 throw new IOException("Outbound buffer overflowed");
             // Just dump the message onto the write buffer and call tryWriteBytes
             // TODO: Kill the needless message duplication when the write completes right away
-            bytesToWrite.offer(ByteBuffer.wrap(Arrays.copyOf(message, message.length)));
+            final SettableFuture<Object> future = SettableFuture.create();
+            bytesToWrite.offer(new BytesAndFuture(ByteBuffer.wrap(Arrays.copyOf(message, message.length)), future));
             bytesToWriteRemaining += message.length;
             setWriteOps();
+            return future;
         } catch (IOException e) {
             lock.unlock();
             andUnlock = false;

@@ -23,8 +23,15 @@ import org.junit.*;
 
 import java.net.*;
 
-import static org.bitcoinj.core.Coin.*;
-import static org.junit.Assert.*;
+import static org.bitcoinj.core.Coin.COIN;
+import static org.easymock.EasyMock.anyObject;
+import static org.easymock.EasyMock.createMock;
+import static org.easymock.EasyMock.expect;
+import static org.easymock.EasyMock.expectLastCall;
+import static org.easymock.EasyMock.replay;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
 public class TxConfidenceTableTest {
     private static final NetworkParameters UNITTEST = UnitTestParams.get();
@@ -43,7 +50,7 @@ public class TxConfidenceTableTest {
 
         tx1 = FakeTxBuilder.createFakeTxWithChangeAddress(UNITTEST, COIN, to, change);
         tx2 = FakeTxBuilder.createFakeTxWithChangeAddress(UNITTEST, COIN, to, change);
-        assertEquals(tx1.getHash(), tx2.getHash());
+        assertEquals(tx1.getTxId(), tx2.getTxId());
 
         address1 = new PeerAddress(UNITTEST, InetAddress.getByAddress(new byte[] { 127, 0, 0, 1 }));
         address2 = new PeerAddress(UNITTEST, InetAddress.getByAddress(new byte[] { 127, 0, 0, 2 }));
@@ -53,7 +60,7 @@ public class TxConfidenceTableTest {
     @Test
     public void pinHandlers() throws Exception {
         Transaction tx = UNITTEST.getDefaultSerializer().makeTransaction(tx1.bitcoinSerialize());
-        Sha256Hash hash = tx.getHash();
+        Sha256Hash hash = tx.getTxId();
         table.seen(hash, address1);
         assertEquals(1, tx.getConfidence().numBroadcastPeers());
         final int[] seen = new int[1];
@@ -78,25 +85,59 @@ public class TxConfidenceTableTest {
                 run[0] = reason;
             }
         });
-        table.seen(tx1.getHash(), address1);
+        table.seen(tx1.getTxId(), address1);
         assertEquals(TransactionConfidence.Listener.ChangeReason.SEEN_PEERS, run[0]);
         run[0] = null;
-        table.seen(tx1.getHash(), address1);
+        table.seen(tx1.getTxId(), address1);
         assertNull(run[0]);
+    }
+
+    @Test
+    public void testSeen() {
+        PeerAddress peer = createMock(PeerAddress.class);
+
+        Sha256Hash brokenHash = createMock(Sha256Hash.class);
+        Sha256Hash correctHash = createMock(Sha256Hash.class);
+
+        TransactionConfidence brokenConfidence = createMock(TransactionConfidence.class);
+        expect(brokenConfidence.getTransactionHash()).andReturn(brokenHash);
+        expect(brokenConfidence.markBroadcastBy(peer)).andThrow(new ArithmeticException("some error"));
+
+        TransactionConfidence correctConfidence = createMock(TransactionConfidence.class);
+        expect(correctConfidence.getTransactionHash()).andReturn(correctHash);
+        expect(correctConfidence.markBroadcastBy(peer)).andReturn(true);
+        correctConfidence.queueListeners(anyObject(TransactionConfidence.Listener.ChangeReason.class));
+        expectLastCall();
+
+        TransactionConfidence.Factory factory = createMock(TransactionConfidence.Factory.class);
+        expect(factory.createConfidence(brokenHash)).andReturn(brokenConfidence);
+        expect(factory.createConfidence(correctHash)).andReturn(correctConfidence);
+
+        replay(factory, brokenConfidence, correctConfidence);
+
+        TxConfidenceTable table = new TxConfidenceTable(1, factory);
+
+        try {
+            table.seen(brokenHash, peer);
+        } catch (ArithmeticException expected) {
+            // do nothing
+        }
+
+        assertNotNull(table.seen(correctHash, peer));
     }
 
     @Test
     public void invAndDownload() throws Exception {
         // Base case: we see a transaction announced twice and then download it. The count is in the confidence object.
-        assertEquals(0, table.numBroadcastPeers(tx1.getHash()));
-        table.seen(tx1.getHash(), address1);
-        assertEquals(1, table.numBroadcastPeers(tx1.getHash()));
-        table.seen(tx1.getHash(), address2);
-        assertEquals(2, table.numBroadcastPeers(tx1.getHash()));
+        assertEquals(0, table.numBroadcastPeers(tx1.getTxId()));
+        table.seen(tx1.getTxId(), address1);
+        assertEquals(1, table.numBroadcastPeers(tx1.getTxId()));
+        table.seen(tx1.getTxId(), address2);
+        assertEquals(2, table.numBroadcastPeers(tx1.getTxId()));
         assertEquals(2, tx2.getConfidence().numBroadcastPeers());
         // And now we see another inv.
-        table.seen(tx1.getHash(), address3);
+        table.seen(tx1.getTxId(), address3);
         assertEquals(3, tx2.getConfidence().numBroadcastPeers());
-        assertEquals(3, table.numBroadcastPeers(tx1.getHash()));
+        assertEquals(3, table.numBroadcastPeers(tx1.getTxId()));
     }
 }

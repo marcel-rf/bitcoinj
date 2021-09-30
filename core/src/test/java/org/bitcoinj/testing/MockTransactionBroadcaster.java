@@ -22,6 +22,7 @@ import org.bitcoinj.wallet.Wallet;
 
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 
 import java.util.concurrent.LinkedBlockingQueue;
@@ -34,7 +35,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * set the returned future when you want the "broadcast" to be completed.
  */
 public class MockTransactionBroadcaster implements TransactionBroadcaster {
-    private final ReentrantLock lock = Threading.lock("mock tx broadcaster");
+    private final ReentrantLock lock = Threading.lock(MockTransactionBroadcaster.class);
     private final Wallet wallet;
 
     public static class TxFuturePair {
@@ -88,7 +89,7 @@ public class MockTransactionBroadcaster implements TransactionBroadcaster {
                 @Override
                 public void onFailure(Throwable t) {
                 }
-            });
+            }, MoreExecutors.directExecutor());
             return TransactionBroadcast.createMockBroadcast(tx, result);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);

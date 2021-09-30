@@ -17,27 +17,20 @@
 
 package org.bitcoinj.wallet;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-
-import java.math.BigInteger;
-import java.util.Date;
 
 import org.bitcoin.protocols.payments.Protos.PaymentDetails;
 import org.bitcoinj.core.Address;
-import org.bitcoinj.core.LegacyAddress;
 import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.Context;
 import org.bitcoinj.core.ECKey;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.Transaction;
 import org.bitcoinj.core.TransactionOutput;
-import org.bitcoinj.script.Script;
-import org.bitcoinj.script.ScriptBuilder;
 import org.bitcoinj.utils.ExchangeRate;
 import org.bitcoinj.wallet.KeyChain.KeyPurpose;
 import org.bitcoinj.wallet.Wallet.MissingSigsMode;
-import org.spongycastle.crypto.params.KeyParameter;
+import org.bouncycastle.crypto.params.KeyParameter;
 
 import com.google.common.base.MoreObjects;
 
@@ -85,12 +78,16 @@ public class SendRequest {
      * a way for people to prioritize their transactions over others and is used as a way to make denial of service
      * attacks expensive.</p>
      *
-     * <p>This is a dynamic fee (in satoshis) which will be added to the transaction for each kilobyte in size
+     * <p>This is a dynamic fee (in satoshis) which will be added to the transaction for each virtual kilobyte in size
      * including the first. This is useful as as miners usually sort pending transactions by their fee per unit size
      * when choosing which transactions to add to a block. Note that, to keep this equivalent to Bitcoin Core
-     * definition, a kilobyte is defined as 1000 bytes, not 1024.</p>
+     * definition, a virtual kilobyte is defined as 1000 virtual bytes, not 1024.</p>
      */
     public Coin feePerKb = Context.get().getFeePerKb();
+
+    public void setFeePerVkb(Coin feePerVkb) {
+        this.feePerKb = feePerVkb;
+    }
 
     /**
      * <p>Requires that there be enough fee for a default Bitcoin Core to at least relay the transaction.
@@ -121,6 +118,13 @@ public class SendRequest {
      * amount.
      */
     public CoinSelector coinSelector = null;
+
+    /**
+     * Shortcut for {@code req.coinSelector = AllowUnconfirmedCoinSelector.get();}.
+     */
+    public void allowUnconfirmed() {
+        coinSelector = AllowUnconfirmedCoinSelector.get();
+    }
 
     /**
      * If true (the default), the outputs will be shuffled during completion to randomize the location of the change
@@ -161,8 +165,9 @@ public class SendRequest {
     /**
      * <p>Creates a new SendRequest to the given address for the given value.</p>
      *
-     * <p>Be very careful when value is smaller than {@link Transaction#MIN_NONDUST_OUTPUT} as the transaction will
-     * likely be rejected by the network in this case.</p>
+     * <p>Be careful to check the output's value is reasonable using
+     * {@link TransactionOutput#getMinNonDustValue(Coin)} afterwards or you risk having the transaction
+     * rejected by the network.</p>
      */
     public static SendRequest to(Address destination, Coin value) {
         SendRequest req = new SendRequest();
@@ -228,25 +233,6 @@ public class SendRequest {
         tx.setPurpose(Transaction.Purpose.RAISE_FEE);
         final SendRequest req = forTx(tx);
         req.completed = true;
-        return req;
-    }
-
-    public static SendRequest toCLTVPaymentChannel(NetworkParameters params, Date releaseTime, ECKey from, ECKey to, Coin value) {
-        long time = releaseTime.getTime() / 1000L;
-        checkArgument(time >= Transaction.LOCKTIME_THRESHOLD, "Release time was too small");
-        return toCLTVPaymentChannel(params, BigInteger.valueOf(time), from, to, value);
-    }
-
-    public static SendRequest toCLTVPaymentChannel(NetworkParameters params, int releaseBlock, ECKey from, ECKey to, Coin value) {
-        checkArgument(0 <= releaseBlock && releaseBlock < Transaction.LOCKTIME_THRESHOLD, "Block number was too large");
-        return toCLTVPaymentChannel(params, BigInteger.valueOf(releaseBlock), from, to, value);
-    }
-
-    public static SendRequest toCLTVPaymentChannel(NetworkParameters params, BigInteger time, ECKey from, ECKey to, Coin value) {
-        SendRequest req = new SendRequest();
-        Script output = ScriptBuilder.createCLTVPaymentChannelOutput(time, from, to);
-        req.tx = new Transaction(params);
-        req.tx.addOutput(value, output);
         return req;
     }
 

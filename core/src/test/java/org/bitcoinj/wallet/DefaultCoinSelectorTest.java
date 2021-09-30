@@ -54,7 +54,7 @@ public class DefaultCoinSelectorTest extends TestWithWallet {
         t.getConfidence().setSource(TransactionConfidence.Source.SELF);
         assertFalse(DefaultCoinSelector.isSelectable(t));
         t.getConfidence().markBroadcastBy(new PeerAddress(UNITTEST, InetAddress.getByName("1.2.3.4")));
-        assertFalse(DefaultCoinSelector.isSelectable(t));
+        assertTrue(DefaultCoinSelector.isSelectable(t));
         t.getConfidence().markBroadcastBy(new PeerAddress(UNITTEST, InetAddress.getByName("5.6.7.8")));
         assertTrue(DefaultCoinSelector.isSelectable(t));
         t = new Transaction(UNITTEST);
@@ -73,7 +73,7 @@ public class DefaultCoinSelectorTest extends TestWithWallet {
         Transaction t2 = checkNotNull(sendMoneyToWallet(AbstractBlockChain.NewBlockType.BEST_CHAIN, COIN));
 
         // Check we selected just the oldest one.
-        DefaultCoinSelector selector = new DefaultCoinSelector();
+        DefaultCoinSelector selector = DefaultCoinSelector.get();
         CoinSelection selection = selector.select(COIN, wallet.calculateAllSpendCandidates());
         assertTrue(selection.gathered.contains(t1.getOutputs().get(0)));
         assertEquals(COIN, selection.valueGathered);
@@ -121,7 +121,7 @@ public class DefaultCoinSelectorTest extends TestWithWallet {
         );
         t.getConfidence().setConfidenceType(TransactionConfidence.ConfidenceType.BUILDING);
 
-        DefaultCoinSelector selector = new DefaultCoinSelector();
+        DefaultCoinSelector selector = DefaultCoinSelector.get();
         CoinSelection selection = selector.select(COIN.multiply(2), outputs);
 
         assertTrue(selection.gathered.size() == 4);

@@ -77,7 +77,8 @@ public class BitcoindComparisonTool {
         VersionMessage ver = new VersionMessage(PARAMS, 42);
         ver.appendToSubVer("BlockAcceptanceComparisonTool", "1.1", null);
         ver.localServices = VersionMessage.NODE_NETWORK;
-        final Peer bitcoind = new Peer(PARAMS, ver, new BlockChain(PARAMS, new MemoryBlockStore(PARAMS)), new PeerAddress(PARAMS, InetAddress.getLocalHost()));
+        final Peer bitcoind = new Peer(PARAMS, ver, new PeerAddress(PARAMS, InetAddress.getLocalHost()),
+                new BlockChain(PARAMS, new MemoryBlockStore(PARAMS)));
         Preconditions.checkState(bitcoind.getVersionMessage().hasBlockChain());
 
         final BlockWrapper currentBlock = new BlockWrapper();
@@ -132,7 +133,7 @@ public class BitcoindComparisonTool {
                     System.exit(1);
                 } else if (m instanceof GetDataMessage) {
                     for (InventoryItem item : ((GetDataMessage) m).items)
-                        if (item.type == InventoryItem.Type.Block) {
+                        if (item.type == InventoryItem.Type.BLOCK) {
                             log.info("Requested " + item.hash);
                             if (currentBlock.block.getHash().equals(item.hash))
                                 bitcoind.sendMessage(currentBlock.block);
@@ -162,7 +163,7 @@ public class BitcoindComparisonTool {
                         }
                         LinkedList<Block> sendHeaders = new LinkedList<>();
                         boolean found = false;
-                        for (Sha256Hash hash : ((GetHeadersMessage) m).getLocator()) {
+                        for (Sha256Hash hash : ((GetHeadersMessage) m).getLocator().getHashes()) {
                             for (Block b : headers) {
                                 if (found) {
                                     sendHeaders.addLast(b);
@@ -206,8 +207,8 @@ public class BitcoindComparisonTool {
 
         connectedFuture.get();
 
-        ArrayList<Sha256Hash> locator = new ArrayList<>(1);
-        locator.add(PARAMS.getGenesisBlock().getHash());
+        BlockLocator locator = new BlockLocator();
+        locator = locator.add(PARAMS.getGenesisBlock().getHash());
         Sha256Hash hashTo = Sha256Hash.wrap("0000000000000000000000000000000000000000000000000000000000000000");
                 
         int rulesSinceFirstFail = 0;
@@ -295,8 +296,8 @@ public class BitcoindComparisonTool {
                 if (block.throwsException)
                     blocksRequested.remove(nextBlock.getHash());
                 //bitcoind.sendMessage(nextBlock);
-                locator.clear();
-                locator.add(bitcoindChainHead);
+                locator = new BlockLocator();
+                locator = locator.add(bitcoindChainHead);
                 bitcoind.sendMessage(new GetHeadersMessage(PARAMS, locator, hashTo));
                 bitcoind.ping().get();
                 if (!chain.getChainHead().getHeader().getHash().equals(bitcoindChainHead)) {

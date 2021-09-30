@@ -18,21 +18,39 @@
 package org.bitcoinj.store;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNull;
 
 import java.io.File;
+import java.math.BigInteger;
+import java.util.Collections;
+import java.util.concurrent.TimeUnit;
 
 import org.bitcoinj.core.Address;
+import org.bitcoinj.core.Block;
 import org.bitcoinj.core.ECKey;
 import org.bitcoinj.core.LegacyAddress;
 import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.core.Sha256Hash;
 import org.bitcoinj.core.StoredBlock;
+import org.bitcoinj.core.Transaction;
+import org.bitcoinj.core.Utils;
 import org.bitcoinj.params.UnitTestParams;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.google.common.base.Stopwatch;
+
 public class SPVBlockStoreTest {
-    private static final NetworkParameters UNITTEST = UnitTestParams.get();
+    private static NetworkParameters UNITTEST;
     private File blockStoreFile;
+
+    @BeforeClass
+    public static void setUpClass() throws Exception {
+        Utils.resetMocking();
+        UNITTEST = UnitTestParams.get();
+    }
 
     @Before
     public void setup() throws Exception {
@@ -64,6 +82,7 @@ public class SPVBlockStoreTest {
         // Check the chain head was stored correctly also.
         StoredBlock chainHead = store.getChainHead();
         assertEquals(b1, chainHead);
+        store.close();
     }
 
     @Test(expected = BlockStoreException.class)
@@ -114,5 +133,54 @@ public class SPVBlockStoreTest {
         SPVBlockStore store = new SPVBlockStore(UNITTEST, blockStoreFile, 20, true);
         store.close();
         store = new SPVBlockStore(UNITTEST, blockStoreFile, 10, true);
+    }
+
+    @Test
+    public void performanceTest() throws BlockStoreException {
+        // On slow machines, this test could fail. Then either add @Ignore or adapt the threshold and please report to
+        // us.
+        final int ITERATIONS = 100000;
+        final long THRESHOLD_MS = 2000;
+        SPVBlockStore store = new SPVBlockStore(UNITTEST, blockStoreFile);
+        Stopwatch watch = Stopwatch.createStarted();
+        for (int i = 0; i < ITERATIONS; i++) {
+            // Using i as the nonce so that the block hashes are different.
+            Block block = new Block(UNITTEST, 0, Sha256Hash.ZERO_HASH, Sha256Hash.ZERO_HASH, 0, 0, i,
+                    Collections.<Transaction> emptyList());
+            StoredBlock b = new StoredBlock(block, BigInteger.ZERO, i);
+            store.put(b);
+            store.setChainHead(b);
+        }
+        assertTrue("took " + watch + " for " + ITERATIONS + " iterations",
+                watch.elapsed(TimeUnit.MILLISECONDS) < THRESHOLD_MS);
+        store.close();
+    }
+
+    @Test
+    public void clear() throws Exception {
+        SPVBlockStore store = new SPVBlockStore(UNITTEST, blockStoreFile);
+
+        // Build a new block.
+        Address to = LegacyAddress.fromKey(UNITTEST, new ECKey());
+        StoredBlock genesis = store.getChainHead();
+        StoredBlock b1 = genesis.build(genesis.getHeader().createNextBlock(to).cloneAsHeader());
+        store.put(b1);
+        store.setChainHead(b1);
+        assertEquals(b1.getHeader().getHash(), store.getChainHead().getHeader().getHash());
+        store.clear();
+        assertNull(store.get(b1.getHeader().getHash()));
+        assertEquals(UNITTEST.getGenesisBlock().getHash(), store.getChainHead().getHeader().getHash());
+        store.close();
+    }
+
+    @Test
+    public void oneStoreDelete() throws Exception {
+        SPVBlockStore store = new SPVBlockStore(UNITTEST, blockStoreFile);
+        store.close();
+        boolean deleted = blockStoreFile.delete();
+        if (!Utils.isWindows()) {
+            // TODO: Deletion is failing on Windows
+            assertTrue(deleted);
+        }
     }
 }

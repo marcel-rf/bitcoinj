@@ -20,7 +20,7 @@ package org.bitcoinj.script;
 import org.bitcoinj.core.LegacyAddress;
 import org.bitcoinj.core.SegwitAddress;
 import org.bitcoinj.core.Sha256Hash;
-import org.spongycastle.util.encoders.Hex;
+import org.bitcoinj.core.Utils;
 
 import java.math.BigInteger;
 import java.util.Arrays;
@@ -39,7 +39,7 @@ public class ScriptPattern {
      * to send somebody money with a written code because their node is offline, but over time has become the standard
      * way to make payments due to the short and recognizable base58 form addresses come in.
      */
-    public static boolean isPayToPubKeyHash(Script script) {
+    public static boolean isP2PKH(Script script) {
         List<ScriptChunk> chunks = script.chunks;
         if (chunks.size() != 5)
             return false;
@@ -61,9 +61,9 @@ public class ScriptPattern {
 
     /**
      * Extract the pubkey hash from a P2PKH scriptPubKey. It's important that the script is in the correct form, so you
-     * will want to guard calls to this method with {@link #isPayToPubKeyHash(Script)}.
+     * will want to guard calls to this method with {@link #isP2PKH(Script)}.
      */
-    public static byte[] extractHashFromPayToPubKeyHash(Script script) {
+    public static byte[] extractHashFromP2PKH(Script script) {
         return script.chunks.get(2).data;
     }
 
@@ -77,7 +77,7 @@ public class ScriptPattern {
      * P2SH is described by <a href="https://github.com/bitcoin/bips/blob/master/bip-0016.mediawiki">BIP16</a>.
      * </p>
      */
-    public static boolean isPayToScriptHash(Script script) {
+    public static boolean isP2SH(Script script) {
         List<ScriptChunk> chunks = script.chunks;
         // We check for the effective serialized form because BIP16 defines a P2SH output using an exact byte
         // template, not the logical program structure. Thus you can have two programs that look identical when
@@ -103,9 +103,9 @@ public class ScriptPattern {
 
     /**
      * Extract the script hash from a P2SH scriptPubKey. It's important that the script is in the correct form, so you
-     * will want to guard calls to this method with {@link #isPayToScriptHash(Script)}.
+     * will want to guard calls to this method with {@link #isP2SH(Script)}.
      */
-    public static byte[] extractHashFromPayToScriptHash(Script script) {
+    public static byte[] extractHashFromP2SH(Script script) {
         return script.chunks.get(1).data;
     }
 
@@ -115,7 +115,7 @@ public class ScriptPattern {
      * of operation being susceptible to man-in-the-middle attacks. It is still used in coinbase outputs and can be
      * useful more exotic types of transaction, but today most payments are to addresses.
      */
-    public static boolean isPayToPubKey(Script script) {
+    public static boolean isP2PK(Script script) {
         List<ScriptChunk> chunks = script.chunks;
         if (chunks.size() != 2)
             return false;
@@ -134,9 +134,9 @@ public class ScriptPattern {
 
     /**
      * Extract the pubkey from a P2SH scriptPubKey. It's important that the script is in the correct form, so you will
-     * want to guard calls to this method with {@link #isPayToPubKey(Script)}.
+     * want to guard calls to this method with {@link #isP2PK(Script)}.
      */
-    public static byte[] extractKeyFromPayToPubKey(Script script) {
+    public static byte[] extractKeyFromP2PK(Script script) {
         return script.chunks.get(0).data;
     }
 
@@ -144,7 +144,7 @@ public class ScriptPattern {
      * Returns true if this script is of the form {@code OP_0 <hash>}. This can either be a P2WPKH or P2WSH scriptPubKey. These
      * two script types were introduced with segwit.
      */
-    public static boolean isPayToWitnessHash(Script script) {
+    public static boolean isP2WH(Script script) {
         List<ScriptChunk> chunks = script.chunks;
         if (chunks.size() != 2)
             return false;
@@ -163,8 +163,8 @@ public class ScriptPattern {
      * Returns true if this script is of the form {@code OP_0 <hash>} and hash is 20 bytes long. This can only be a P2WPKH
      * scriptPubKey. This script type was introduced with segwit.
      */
-    public static boolean isPayToWitnessPubKeyHash(Script script) {
-        if (!isPayToWitnessHash(script))
+    public static boolean isP2WPKH(Script script) {
+        if (!isP2WH(script))
             return false;
         List<ScriptChunk> chunks = script.chunks;
         if (!chunks.get(0).equalsOpCode(OP_0))
@@ -177,8 +177,8 @@ public class ScriptPattern {
      * Returns true if this script is of the form {@code OP_0 <hash>} and hash is 32 bytes long. This can only be a P2WSH
      * scriptPubKey. This script type was introduced with segwit.
      */
-    public static boolean isPayToWitnessScriptHash(Script script) {
-        if (!isPayToWitnessHash(script))
+    public static boolean isP2WSH(Script script) {
+        if (!isP2WH(script))
             return false;
         List<ScriptChunk> chunks = script.chunks;
         if (!chunks.get(0).equalsOpCode(OP_0))
@@ -190,84 +190,33 @@ public class ScriptPattern {
     /**
      * Extract the pubkey hash from a P2WPKH or the script hash from a P2WSH scriptPubKey. It's important that the
      * script is in the correct form, so you will want to guard calls to this method with
-     * {@link #isPayToWitnessHash(Script)}.
+     * {@link #isP2WH(Script)}.
      */
-    public static byte[] extractHashFromPayToWitnessHash(Script script) {
+    public static byte[] extractHashFromP2WH(Script script) {
         return script.chunks.get(1).data;
     }
 
     /**
-     * Returns whether this script matches the format used for multisig outputs:
-     * {@code [n] [keys...] [m] CHECKMULTISIG}
+     * Returns whether this script matches the format used for m-of-n multisig outputs:
+     * {@code [m] [keys...] [n] CHECKMULTISIG}
      */
     public static boolean isSentToMultisig(Script script) {
         List<ScriptChunk> chunks = script.chunks;
         if (chunks.size() < 4) return false;
         ScriptChunk chunk = chunks.get(chunks.size() - 1);
         // Must end in OP_CHECKMULTISIG[VERIFY].
-        if (!chunk.isOpCode()) return false;
         if (!(chunk.equalsOpCode(OP_CHECKMULTISIG) || chunk.equalsOpCode(OP_CHECKMULTISIGVERIFY))) return false;
-        try {
-            // Second to last chunk must be an OP_N opcode and there should be that many data chunks (keys).
-            ScriptChunk m = chunks.get(chunks.size() - 2);
-            if (!m.isOpCode()) return false;
-            int numKeys = decodeFromOpN(m.opcode);
-            if (numKeys < 1 || chunks.size() != 3 + numKeys) return false;
-            for (int i = 1; i < chunks.size() - 2; i++) {
-                if (chunks.get(i).isOpCode()) return false;
-            }
-            // First chunk must be an OP_N opcode too.
-            if (decodeFromOpN(chunks.get(0).opcode) < 1) return false;
-        } catch (IllegalStateException e) {
-            return false;   // Not an OP_N opcode.
+        // Second to last chunk must be an OP_N opcode and there should be that many data chunks (keys).
+        int nOpCode = chunks.get(chunks.size() - 2).opcode;
+        if (nOpCode < OP_1 || nOpCode > OP_16) return false;
+        int numKeys = decodeFromOpN(nOpCode);
+        if (numKeys < 1 || chunks.size() != 3 + numKeys) return false;
+        for (int i = 1; i < chunks.size() - 2; i++) {
+            if (chunks.get(i).isOpCode()) return false;
         }
-        return true;
-    }
-
-    /**
-     * Returns whether this script matches the format used for LOCKTIMEVERIFY transactions.
-     */
-    public static boolean isSentToCltvPaymentChannel(Script script) {
-        List<ScriptChunk> chunks = script.chunks;
-        if (chunks.size() != 10) return false;
-        // Check that opcodes match the pre-determined format.
-        if (!chunks.get(0).equalsOpCode(OP_IF)) return false;
-        // chunk[1] = recipient pubkey
-        if (!chunks.get(2).equalsOpCode(OP_CHECKSIGVERIFY)) return false;
-        if (!chunks.get(3).equalsOpCode(OP_ELSE)) return false;
-        // chunk[4] = locktime
-        if (!chunks.get(5).equalsOpCode(OP_CHECKLOCKTIMEVERIFY)) return false;
-        if (!chunks.get(6).equalsOpCode(OP_DROP)) return false;
-        if (!chunks.get(7).equalsOpCode(OP_ENDIF)) return false;
-        // chunk[8] = sender pubkey
-        if (!chunks.get(9).equalsOpCode(OP_CHECKSIG)) return false;
-        return true;
-    }
-
-    /**
-     * Retrieves the public key of the sender from a LOCKTIMEVERIFY transaction. It's important that the script is in
-     * the correct form, so you will want to guard calls to this method with
-     * {@link #isSentToCltvPaymentChannel(Script)}.
-     */
-    public static byte[] extractSenderPubKeyFromCltvPaymentChannel(Script script) {
-        return script.chunks.get(8).data;
-    }
-
-    /**
-     * Retrieves the public key of the recipient from a LOCKTIMEVERIFY transaction. It's important that the script is in
-     * the correct form, so you will want to guard calls to this method with
-     * {@link #isSentToCltvPaymentChannel(Script)}.
-     */
-    public static byte[] extractRecipientPubKeyFromCltvPaymentChannel(Script script) {
-        return script.chunks.get(1).data;
-    }
-
-    /**
-     * Retrieves the locktime from a LOCKTIMEVERIFY transaction. It's important that the script is in the correct form,
-     * so you will want to guard calls to this method with {@link #isSentToCltvPaymentChannel(Script)}.
-     */
-    public static BigInteger extractExpiryFromCltvPaymentChannel(Script script) {
-        return Script.castToBigInteger(script.chunks.get(4).data, 5, false);
+        // First chunk must be an OP_N opcode too.
+        int mOpCode = chunks.get(0).opcode;
+        return mOpCode >= OP_1 && mOpCode <= OP_16;
     }
 
     /**
@@ -278,13 +227,13 @@ public class ScriptPattern {
         return chunks.size() > 0 && chunks.get(0).equalsOpCode(ScriptOpCodes.OP_RETURN);
     }
 
-    private static final byte[] SEGWIT_COMMITMENT_HEADER = Hex.decode("aa21a9ed");
+    private static final byte[] SEGWIT_COMMITMENT_HEADER = Utils.HEX.decode("aa21a9ed");
 
     /**
      * Returns whether this script matches the pattern for a segwit commitment (in an output of the coinbase
      * transaction).
      */
-    public static boolean isSegwitCommitment(Script script) {
+    public static boolean isWitnessCommitment(Script script) {
         List<ScriptChunk> chunks = script.chunks;
         if (chunks.size() < 2)
             return false;
@@ -301,7 +250,7 @@ public class ScriptPattern {
     /**
      * Retrieves the hash from a segwit commitment (in an output of the coinbase transaction).
      */
-    public static Sha256Hash extractSegwitCommitmentHash(Script script) {
+    public static Sha256Hash extractWitnessCommitmentHash(Script script) {
         return Sha256Hash.wrap(Arrays.copyOfRange(script.chunks.get(1).data, 4, 36));
     }
 }

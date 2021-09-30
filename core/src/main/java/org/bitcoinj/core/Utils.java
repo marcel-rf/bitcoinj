@@ -24,25 +24,19 @@ import java.math.BigInteger;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Date;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-import org.spongycastle.crypto.digests.RIPEMD160Digest;
+import org.bouncycastle.crypto.digests.RIPEMD160Digest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Ordering;
 import com.google.common.io.BaseEncoding;
-import com.google.common.primitives.Ints;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
@@ -67,7 +61,7 @@ public class Utils {
     */
     public static final int MAX_INITIAL_ARRAY_LENGTH = 20;
 
-    private static BlockingQueue<Boolean> mockSleepQueue;
+    private static final Logger log = LoggerFactory.getLogger(Utils.class);
 
     /**
      * <p>
@@ -384,7 +378,7 @@ public class Utils {
     /**
      * If non-null, overrides the return value of now().
      */
-    public static volatile Date mockTime;
+    private static volatile Date mockTime;
 
     /**
      * Advances (or rewinds) the mock clock by the given number of seconds.
@@ -418,18 +412,29 @@ public class Utils {
     }
 
     /**
+     * Clears the mock clock and sleep
+     */
+    public static void resetMocking() {
+        mockTime = null;
+    }
+
+    /**
      * Returns the current time, or a mocked out equivalent.
      */
     public static Date now() {
         return mockTime != null ? mockTime : new Date();
     }
 
-    // TODO: Replace usages of this where the result is / 1000 with currentTimeSeconds.
-    /** Returns the current time in milliseconds since the epoch, or a mocked out equivalent. */
+    /**
+     * Returns the current time in milliseconds since the epoch, or a mocked out equivalent.
+     */
     public static long currentTimeMillis() {
         return mockTime != null ? mockTime.getTime() : System.currentTimeMillis();
     }
 
+    /**
+     * Returns the current time in seconds since the epoch, or a mocked out equivalent.
+     */
     public static long currentTimeSeconds() {
         return currentTimeMillis() / 1000;
     }
@@ -469,101 +474,70 @@ public class Utils {
         data[index >>> 3] |= bitMask[7 & index];
     }
 
-    /** Sleep for a span of time, or mock sleep if enabled */
-    public static void sleep(long millis) {
-        if (mockSleepQueue == null) {
-            sleepUninterruptibly(millis, TimeUnit.MILLISECONDS);
-        } else {
-            try {
-                boolean isMultiPass = mockSleepQueue.take();
-                rollMockClockMillis(millis);
-                if (isMultiPass)
-                    mockSleepQueue.offer(true);
-            } catch (InterruptedException e) {
-                // Ignored.
-            }
-        }
+    private enum Runtime {
+        ANDROID, OPENJDK, ORACLE_JAVA
     }
 
-    /** Enable or disable mock sleep.  If enabled, set mock time to current time. */
-    public static void setMockSleep(boolean isEnable) {
-        if (isEnable) {
-            mockSleepQueue = new ArrayBlockingQueue<>(1);
-            mockTime = new Date(System.currentTimeMillis());
-        } else {
-            mockSleepQueue = null;
-        }
+    private enum OS {
+        LINUX, WINDOWS, MAC_OS
     }
 
-    /** Let sleeping thread pass the synchronization point.  */
-    public static void passMockSleep() {
-        mockSleepQueue.offer(false);
+    private static Runtime runtime = null;
+    private static OS os = null;
+    static {
+        String runtimeProp = System.getProperty("java.runtime.name", "").toLowerCase(Locale.US);
+        if (runtimeProp.equals(""))
+            runtime = null;
+        else if (runtimeProp.contains("android"))
+            runtime = Runtime.ANDROID;
+        else if (runtimeProp.contains("openjdk"))
+            runtime = Runtime.OPENJDK;
+        else if (runtimeProp.contains("java(tm) se"))
+            runtime = Runtime.ORACLE_JAVA;
+        else
+            log.info("Unknown java.runtime.name '{}'", runtimeProp);
+
+        String osProp = System.getProperty("os.name", "").toLowerCase(Locale.US);
+        if (osProp.equals(""))
+            os = null;
+        else if (osProp.contains("linux"))
+            os = OS.LINUX;
+        else if (osProp.contains("win"))
+            os = OS.WINDOWS;
+        else if (osProp.contains("mac"))
+            os = OS.MAC_OS;
+        else
+            log.info("Unknown os.name '{}'", runtimeProp);
     }
 
-    /** Let the sleeping thread pass the synchronization point any number of times. */
-    public static void finishMockSleep() {
-        if (mockSleepQueue != null) {
-            mockSleepQueue.offer(true);
-        }
-    }
-
-    private static class Pair implements Comparable<Pair> {
-        int item, count;
-        public Pair(int item, int count) { this.count = count; this.item = item; }
-        // note that in this implementation compareTo() is not consistent with equals()
-        @Override public int compareTo(Pair o) { return -Ints.compare(count, o.count); }
-    }
-
-    public static int maxOfMostFreq(int... items) {
-        ArrayList<Integer> list = new ArrayList<>(items.length);
-        for (int item : items) list.add(item);
-        return maxOfMostFreq(list);
-    }
-
-    public static int maxOfMostFreq(List<Integer> items) {
-        if (items.isEmpty())
-            return 0;
-        // This would be much easier in a functional language (or in Java 8).
-        items = Ordering.natural().reverse().sortedCopy(items);
-        LinkedList<Pair> pairs = Lists.newLinkedList();
-        pairs.add(new Pair(items.get(0), 0));
-        for (int item : items) {
-            Pair pair = pairs.getLast();
-            if (pair.item != item)
-                pairs.add((pair = new Pair(item, 0)));
-            pair.count++;
-        }
-        // pairs now contains a uniqified list of the sorted inputs, with counts for how often that item appeared.
-        // Now sort by how frequently they occur, and pick the max of the most frequent.
-        Collections.sort(pairs);
-        int maxCount = pairs.getFirst().count;
-        int maxItem = pairs.getFirst().item;
-        for (Pair pair : pairs) {
-            if (pair.count != maxCount)
-                break;
-            maxItem = Math.max(maxItem, pair.item);
-        }
-        return maxItem;
-    }
-
-    private static int isAndroid = -1;
     public static boolean isAndroidRuntime() {
-        if (isAndroid == -1) {
-            final String runtime = System.getProperty("java.runtime.name");
-            isAndroid = (runtime != null && runtime.equals("Android Runtime")) ? 1 : 0;
-        }
-        return isAndroid == 1;
+        return runtime == Runtime.ANDROID;
+    }
+
+    public static boolean isOpenJDKRuntime() {
+        return runtime == Runtime.OPENJDK;
+    }
+
+    public static boolean isOracleJavaRuntime() {
+        return runtime == Runtime.ORACLE_JAVA;
     }
 
     public static boolean isLinux() {
-        return System.getProperty("os.name").toLowerCase().contains("linux");
+        return os == OS.LINUX;
     }
 
     public static boolean isWindows() {
-        return System.getProperty("os.name").toLowerCase().contains("win");
+        return os == OS.WINDOWS;
     }
 
     public static boolean isMac() {
-        return System.getProperty("os.name").toLowerCase().contains("mac");
+        return os == OS.MAC_OS;
+    }
+
+    public static String toString(List<byte[]> stack) {
+        List<String> parts = new ArrayList<>(stack.size());
+        for (byte[] push : stack)
+            parts.add('[' + HEX.encode(push) + ']');
+        return SPACE_JOINER.join(parts);
     }
 }

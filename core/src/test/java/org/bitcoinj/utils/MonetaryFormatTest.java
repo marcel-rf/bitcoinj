@@ -24,9 +24,11 @@ import static org.junit.Assert.assertEquals;
 
 import java.util.Locale;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.bitcoinj.core.Coin;
+import org.bitcoinj.core.NetworkParameters;
 
 public class MonetaryFormatTest {
 
@@ -184,6 +186,13 @@ public class MonetaryFormatTest {
         assertEquals("11223344556677.88", format(value, 6, 2));
     }
 
+    @Test
+    public void sat() throws Exception {
+        assertEquals("0", format(ZERO, 8, 0));
+        assertEquals("100000000", format(COIN, 8, 0));
+        assertEquals("2100000000000000", format(NetworkParameters.MAX_MONEY, 8, 0));
+    }
+
     private String format(Coin coin, int shift, int minDecimals, int... decimalGroups) {
         return NO_CODE.shift(shift).minDecimals(minDecimals).optionalDecimals(decimalGroups).format(coin).toString();
     }
@@ -213,6 +222,12 @@ public class MonetaryFormatTest {
         assertEquals("BTC 0.00", MonetaryFormat.BTC.format(Coin.ZERO).toString());
         assertEquals("mBTC 0.00", MonetaryFormat.MBTC.format(Coin.ZERO).toString());
         assertEquals("µBTC 0", MonetaryFormat.UBTC.format(Coin.ZERO).toString());
+        assertEquals("sat 0", MonetaryFormat.SAT.format(Coin.ZERO).toString());
+    }
+
+    @Test
+    public void standardSymbol() throws Exception {
+        assertEquals(MonetaryFormat.SYMBOL_BTC + " 0.00", new MonetaryFormat(true).format(Coin.ZERO).toString());
     }
 
     @Test
@@ -251,6 +266,12 @@ public class MonetaryFormatTest {
         final Coin value = Coin.valueOf(-1234567890l);
         assertEquals("-12.34567890", NO_CODE.withLocale(Locale.US).format(value).toString());
         assertEquals("-12,34567890", NO_CODE.withLocale(Locale.GERMANY).format(value).toString());
+    }
+
+    @Ignore("non-determinism between OpenJDK versions")
+    @Test
+    public void withLocaleDevanagari() throws Exception {
+        final Coin value = Coin.valueOf(-1234567890l);
         assertEquals("-१२.३४५६७८९०", NO_CODE.withLocale(new Locale("hi", "IN")).format(value).toString()); // Devanagari
     }
 
@@ -280,6 +301,11 @@ public class MonetaryFormatTest {
         assertEquals(Coin.MICROCOIN, MonetaryFormat.UBTC.positiveSign('+').parse("+1.0"));
         assertEquals(Coin.MICROCOIN.negate(), MonetaryFormat.UBTC.parse("-1"));
         assertEquals(Coin.MICROCOIN.negate(), MonetaryFormat.UBTC.parse("-1.0"));
+
+        assertEquals(Coin.SATOSHI, MonetaryFormat.SAT.parse("1"));
+        assertEquals(Coin.SATOSHI, MonetaryFormat.SAT.parse("01"));
+        assertEquals(Coin.SATOSHI, MonetaryFormat.SAT.positiveSign('+').parse("+1"));
+        assertEquals(Coin.SATOSHI.negate(), MonetaryFormat.SAT.parse("-1"));
 
         assertEquals(Coin.CENT, NO_CODE.withLocale(new Locale("hi", "IN")).parse(".०१")); // Devanagari
     }
@@ -339,5 +365,19 @@ public class MonetaryFormatTest {
     @Test
     public void fiat() throws Exception {
         assertEquals(ONE_EURO, NO_CODE.parseFiat("EUR", "1"));
+    }
+
+    @Test
+    public void testEquals() {
+        MonetaryFormat mf1 = new MonetaryFormat(true);
+        MonetaryFormat mf2 = new MonetaryFormat(true);
+        assertEquals(mf1, mf2);
+    }
+
+    @Test
+    public void testHashCode() {
+        MonetaryFormat mf1 = new MonetaryFormat(true);
+        MonetaryFormat mf2 = new MonetaryFormat(true);
+        assertEquals(mf1.hashCode(), mf2.hashCode());
     }
 }

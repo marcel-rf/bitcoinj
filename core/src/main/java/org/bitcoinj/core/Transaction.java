@@ -31,18 +31,18 @@ import org.bitcoinj.utils.ExchangeRate;
 import org.bitcoinj.wallet.Wallet;
 import org.bitcoinj.wallet.WalletTransaction.Pool;
 
-import com.google.common.base.Strings;
+import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.primitives.Ints;
-import com.google.common.primitives.Longs;
+import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.spongycastle.crypto.params.KeyParameter;
+import org.bouncycastle.crypto.params.KeyParameter;
 
 import javax.annotation.Nullable;
 import java.io.*;
 import java.util.*;
 
+import static org.bitcoinj.core.NetworkParameters.ProtocolVersion.WITNESS_VERSION;
 import static org.bitcoinj.core.Utils.*;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -74,9 +74,9 @@ public class Transaction extends ChildMessage {
         public int compare(final Transaction tx1, final Transaction tx2) {
             final long time1 = tx1.getUpdateTime().getTime();
             final long time2 = tx2.getUpdateTime().getTime();
-            final int updateTimeComparison = -(Longs.compare(time1, time2));
+            final int updateTimeComparison = -(Long.compare(time1, time2));
             //If time1==time2, compare by tx hash to make comparator consistent with equals
-            return updateTimeComparison != 0 ? updateTimeComparison : tx1.getHash().compareTo(tx2.getHash());
+            return updateTimeComparison != 0 ? updateTimeComparison : tx1.getTxId().compareTo(tx2.getTxId());
         }
     };
     /** A comparator that can be used to sort transactions by their chain height. */
@@ -89,12 +89,18 @@ public class Transaction extends ChildMessage {
             final TransactionConfidence confidence2 = tx2.getConfidence();
             final int height2 = confidence2.getConfidenceType() == ConfidenceType.BUILDING
                     ? confidence2.getAppearedAtChainHeight() : Block.BLOCK_HEIGHT_UNKNOWN;
-            final int heightComparison = -(Ints.compare(height1, height2));
+            final int heightComparison = -(Integer.compare(height1, height2));
             //If height1==height2, compare by tx hash to make comparator consistent with equals
-            return heightComparison != 0 ? heightComparison : tx1.getHash().compareTo(tx2.getHash());
+            return heightComparison != 0 ? heightComparison : tx1.getTxId().compareTo(tx2.getTxId());
         }
     };
     private static final Logger log = LoggerFactory.getLogger(Transaction.class);
+
+    /**
+     * When this bit is set in protocolVersion, do not include witness. The actual value is the same as in Bitcoin Core
+     * for consistency.
+     */
+    public static final int SERIALIZE_TRANSACTION_NO_WITNESS = 0x40000000;
 
     /** Threshold for lockTime: below this value it is interpreted as block number, otherwise as timestamp. **/
     public static final int LOCKTIME_THRESHOLD = 500000000; // Tue Nov  5 00:53:20 1985 UTC
@@ -115,11 +121,8 @@ public class Transaction extends ChildMessage {
      */
     public static final Coin DEFAULT_TX_FEE = Coin.valueOf(100000); // 1 mBTC
 
-    /**
-     * Any standard (ie P2PKH) output smaller than this value (in satoshis) will most likely be rejected by the network.
-     * This is calculated by assuming a standard output will be 34 bytes, and then using the formula used in
-     * {@link TransactionOutput#getMinNonDustValue(Coin)}.
-     */
+    /** @deprecated use {@link TransactionOutput#getMinNonDustValue()} */
+    @Deprecated
     public static final Coin MIN_NONDUST_OUTPUT = Coin.valueOf(546); // satoshis
 
     // These are bitcoin serialized.
@@ -135,9 +138,9 @@ public class Transaction extends ChildMessage {
     // list of transactions from a wallet, which is helpful for presenting to users.
     private Date updatedAt;
 
-    // This is an in memory helper only. It contains the transaction hash (aka txid), used as a reference by transaction
-    // inputs via outpoints.
-    private Sha256Hash hash;
+    // These are in memory helpers only. They contain the transaction hashes without and with witness.
+    private Sha256Hash cachedTxId;
+    private Sha256Hash cachedWTxId;
 
     // Data about how confirmed this tx is. Serialized, may be null.
     @Nullable private TransactionConfidence confidence;
@@ -230,11 +233,19 @@ public class Transaction extends ChildMessage {
      * @param setSerializer The serializer to use for this transaction.
      * @param length The length of message if known.  Usually this is provided when deserializing of the wire
      * as the length will be provided as part of the header.  If unknown then set to Message.UNKNOWN_LENGTH
+     * @param hashFromHeader Used by BitcoinSerializer. The serializer has to calculate a hash for checksumming so to
+     * avoid wasting the considerable effort a set method is provided so the serializer can set it. No verification
+     * is performed on this hash.
      * @throws ProtocolException
      */
-    public Transaction(NetworkParameters params, byte[] payload, int offset, @Nullable Message parent, MessageSerializer setSerializer, int length)
-            throws ProtocolException {
+    public Transaction(NetworkParameters params, byte[] payload, int offset, @Nullable Message parent,
+            MessageSerializer setSerializer, int length, @Nullable byte[] hashFromHeader) throws ProtocolException {
         super(params, payload, offset, parent, setSerializer, length);
+        if (hashFromHeader != null) {
+            cachedWTxId = Sha256Hash.wrapReversed(hashFromHeader);
+            if (!hasWitnesses())
+                cachedTxId = cachedWTxId;
+        }
     }
 
     /**
@@ -245,39 +256,91 @@ public class Transaction extends ChildMessage {
         super(params, payload, 0, parent, setSerializer, length);
     }
 
-    /**
-     * Returns the transaction hash (aka txid) as you see them in block explorers. It is used as a reference by
-     * transaction inputs via outpoints.
-     */
+    /** @deprecated use {@link #getTxId()} */
     @Override
+    @Deprecated
     public Sha256Hash getHash() {
-        if (hash == null) {
-            ByteArrayOutputStream stream = new UnsafeByteArrayOutputStream(length < 32 ? 32 : length + 32);
-            try {
-                bitcoinSerializeToStream(stream, false);
-            } catch (IOException e) {
-                // Cannot happen, we are serializing to a memory stream.
-            }
-            hash = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(stream.toByteArray()));
-        }
-        return hash;
+        return getTxId();
     }
 
-    /**
-     * Used by BitcoinSerializer.  The serializer has to calculate a hash for checksumming so to
-     * avoid wasting the considerable effort a set method is provided so the serializer can set it.
-     *
-     * No verification is performed on this hash.
-     */
-    void setHash(Sha256Hash hash) {
-        this.hash = hash;
-    }
-
-    /**
-     * Returns the transaction hash (aka txid) as you see them in block explorers, as a hex string.
-     */
+    /** @deprecated use {@link #getTxId()}.toString() */
+    @Deprecated
     public String getHashAsString() {
-        return getHash().toString();
+        return getTxId().toString();
+    }
+
+    /**
+     * Returns the transaction id as you see them in block explorers. It is used as a reference by transaction inputs
+     * via outpoints.
+     */
+    public Sha256Hash getTxId() {
+        if (cachedTxId == null) {
+            if (!hasWitnesses() && cachedWTxId != null) {
+                cachedTxId = cachedWTxId;
+            } else {
+                ByteArrayOutputStream stream = new UnsafeByteArrayOutputStream(length < 32 ? 32 : length + 32);
+                try {
+                    bitcoinSerializeToStream(stream, false);
+                } catch (IOException e) {
+                    throw new RuntimeException(e); // cannot happen
+                }
+                cachedTxId = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(stream.toByteArray()));
+            }
+        }
+        return cachedTxId;
+    }
+
+    /**
+     * Returns if tx witnesses are allowed based on the protocol version
+     */
+    private boolean allowWitness() {
+        int protocolVersion = serializer.getProtocolVersion();
+        return (protocolVersion & SERIALIZE_TRANSACTION_NO_WITNESS) == 0
+                && protocolVersion >= WITNESS_VERSION.getBitcoinProtocolVersion();
+    }
+
+    /**
+     * Returns the witness transaction id (aka witness id) as per BIP144. For transactions without witness, this is the
+     * same as {@link #getTxId()}.
+     */
+    public Sha256Hash getWTxId() {
+        if (cachedWTxId == null) {
+            if (!hasWitnesses() && cachedTxId != null) {
+                cachedWTxId = cachedTxId;
+            } else {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                try {
+                    bitcoinSerializeToStream(baos, hasWitnesses());
+                } catch (IOException e) {
+                    throw new RuntimeException(e); // cannot happen
+                }
+                cachedWTxId = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(baos.toByteArray()));
+            }
+        }
+        return cachedWTxId;
+    }
+
+    /** Gets the transaction weight as defined in BIP141. */
+    public int getWeight() {
+        if (!hasWitnesses())
+            return getMessageSize() * 4;
+        try (final ByteArrayOutputStream stream = new UnsafeByteArrayOutputStream(length)) {
+            bitcoinSerializeToStream(stream, false);
+            final int baseSize = stream.size();
+            stream.reset();
+            bitcoinSerializeToStream(stream, true);
+            final int totalSize = stream.size();
+            return baseSize * 3 + totalSize;
+        } catch (IOException e) {
+            throw new RuntimeException(e); // cannot happen
+        }
+    }
+
+    /** Gets the virtual transaction size as defined in BIP141. */
+    public int getVsize() {
+        if (!hasWitnesses())
+            return getMessageSize();
+        return (getWeight() + 3) / 4; // round up
     }
 
     /**
@@ -525,7 +588,8 @@ public class Transaction extends ChildMessage {
     @Override
     protected void unCache() {
         super.unCache();
-        hash = null;
+        cachedTxId = null;
+        cachedWTxId = null;
     }
 
     protected static int calcLength(byte[] buf, int offset) {
@@ -534,30 +598,30 @@ public class Transaction extends ChildMessage {
         int cursor = offset + 4;
 
         int i;
-        long scriptLen;
+        int scriptLen;
 
         varint = new VarInt(buf, cursor);
-        long txInCount = varint.value;
+        int txInCount = varint.intValue();
         cursor += varint.getOriginalSizeInBytes();
 
         for (i = 0; i < txInCount; i++) {
             // 36 = length of previous_outpoint
             cursor += 36;
             varint = new VarInt(buf, cursor);
-            scriptLen = varint.value;
+            scriptLen = varint.intValue();
             // 4 = length of sequence field (unint32)
             cursor += scriptLen + 4 + varint.getOriginalSizeInBytes();
         }
 
         varint = new VarInt(buf, cursor);
-        long txOutCount = varint.value;
+        int txOutCount = varint.intValue();
         cursor += varint.getOriginalSizeInBytes();
 
         for (i = 0; i < txOutCount; i++) {
             // 8 = length of tx value field (uint64)
             cursor += 8;
             varint = new VarInt(buf, cursor);
-            scriptLen = varint.value;
+            scriptLen = varint.intValue();
             cursor += scriptLen + varint.getOriginalSizeInBytes();
         }
         // 4 = length of lock_time field (uint32)
@@ -571,26 +635,46 @@ public class Transaction extends ChildMessage {
      */
     @Override
     protected void parse() throws ProtocolException {
+        boolean allowWitness = allowWitness();
+
         cursor = offset;
         optimalEncodingMessageSize = 4;
 
         // version
         version = readUint32();
-        // peek at marker
-        byte marker = payload[cursor];
-        boolean useSegwit = marker == 0;
-        // marker, flag
-        if (useSegwit) {
-            readBytes(2);
-            optimalEncodingMessageSize += 2;
-        }
-        // txin_count, txins
+        byte flags = 0;
+        // Try to parse the inputs. In case the dummy is there, this will be read as an empty array list.
         parseInputs();
-        // txout_count, txouts
-        parseOutputs();
-        // script_witnesses
-        if (useSegwit)
+        if (inputs.size() == 0 && allowWitness) {
+            // We read a dummy or an empty input
+            flags = readByte();
+            optimalEncodingMessageSize += 2;
+
+            if (flags != 0) {
+                parseInputs();
+                parseOutputs();
+            } else {
+                outputs = new ArrayList<>(0);
+            }
+        } else {
+            // We read non-empty inputs. Assume normal outputs follows.
+            parseOutputs();
+        }
+
+        if (((flags & 1) != 0) && allowWitness) {
+            // The witness flag is present, and we support witnesses.
+            flags ^= 1;
+            // script_witnesses
             parseWitnesses();
+            if (!hasWitnesses()) {
+                // It's illegal to encode witnesses when all witness stacks are empty.
+                throw new ProtocolException("Superfluous witness record");
+            }
+        }
+        if (flags != 0) {
+            // Unknown flag in the serialization
+            throw new ProtocolException("Unknown transaction optional data");
+        }
         // lock_time
         lockTime = readUint32();
         optimalEncodingMessageSize += 4;
@@ -599,27 +683,31 @@ public class Transaction extends ChildMessage {
     }
 
     private void parseInputs() {
-        long numInputs = readVarInt();
-        optimalEncodingMessageSize += VarInt.sizeOf(numInputs);
+        VarInt numInputsVarInt = readVarInt();
+        optimalEncodingMessageSize += numInputsVarInt.getSizeInBytes();
+        int numInputs = numInputsVarInt.intValue();
         inputs = new ArrayList<>(Math.min((int) numInputs, Utils.MAX_INITIAL_ARRAY_LENGTH));
         for (long i = 0; i < numInputs; i++) {
             TransactionInput input = new TransactionInput(params, this, payload, cursor, serializer);
             inputs.add(input);
-            long scriptLen = readVarInt(TransactionOutPoint.MESSAGE_LENGTH);
-            optimalEncodingMessageSize += TransactionOutPoint.MESSAGE_LENGTH + VarInt.sizeOf(scriptLen) + scriptLen + 4;
+            VarInt scriptLenVarInt = readVarInt(TransactionOutPoint.MESSAGE_LENGTH);
+            int scriptLen = scriptLenVarInt.intValue();
+            optimalEncodingMessageSize += TransactionOutPoint.MESSAGE_LENGTH + scriptLenVarInt.getSizeInBytes() + scriptLen + 4;
             cursor += scriptLen + 4;
         }
     }
 
     private void parseOutputs() {
-        long numOutputs = readVarInt();
-        optimalEncodingMessageSize += VarInt.sizeOf(numOutputs);
+        VarInt numOutputsVarInt = readVarInt();
+        optimalEncodingMessageSize += numOutputsVarInt.getSizeInBytes();
+        int numOutputs = numOutputsVarInt.intValue();
         outputs = new ArrayList<>(Math.min((int) numOutputs, Utils.MAX_INITIAL_ARRAY_LENGTH));
         for (long i = 0; i < numOutputs; i++) {
             TransactionOutput output = new TransactionOutput(params, this, payload, cursor, serializer);
             outputs.add(output);
-            long scriptLen = readVarInt(8);
-            optimalEncodingMessageSize += 8 + VarInt.sizeOf(scriptLen) + scriptLen;
+            VarInt scriptLenVarInt = readVarInt(8);
+            int scriptLen = scriptLenVarInt.intValue();
+            optimalEncodingMessageSize += 8 + scriptLenVarInt.getSizeInBytes() + scriptLen;
             cursor += scriptLen;
         }
     }
@@ -627,14 +715,16 @@ public class Transaction extends ChildMessage {
     private void parseWitnesses() {
         int numWitnesses = inputs.size();
         for (int i = 0; i < numWitnesses; i++) {
-            long pushCount = readVarInt();
-            TransactionWitness witness = new TransactionWitness((int) pushCount);
+            VarInt pushCountVarInt = readVarInt();
+            int pushCount = pushCountVarInt.intValue();
+            optimalEncodingMessageSize += pushCountVarInt.getSizeInBytes();
+            TransactionWitness witness = new TransactionWitness(pushCount);
             getInput(i).setWitness(witness);
-            optimalEncodingMessageSize += VarInt.sizeOf(pushCount);
             for (int y = 0; y < pushCount; y++) {
-                long pushSize = readVarInt();
-                optimalEncodingMessageSize += VarInt.sizeOf(pushSize) + pushSize;
-                byte[] push = readBytes((int) pushSize);
+                VarInt pushSizeVarInt = readVarInt();
+                int pushSize = pushSizeVarInt.intValue();
+                optimalEncodingMessageSize += pushSizeVarInt.getSizeInBytes() + pushSize;
+                byte[] push = readBytes(pushSize);
                 witness.setPush(y, push);
             }
         }
@@ -697,22 +787,38 @@ public class Transaction extends ChildMessage {
 
     @Override
     public String toString() {
-        return toString(null);
+        MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(this);
+        helper.addValue(toString(null, null));
+        return helper.toString();
     }
 
     /**
      * A human readable version of the transaction useful for debugging. The format is not guaranteed to be stable.
      * @param chain If provided, will be used to estimate lock times (if set). Can be null.
      */
-    public String toString(@Nullable AbstractBlockChain chain) {
+    public String toString(@Nullable AbstractBlockChain chain, @Nullable CharSequence indent) {
+        if (indent == null)
+            indent = "";
         StringBuilder s = new StringBuilder();
-        s.append("  ").append(getHashAsString()).append('\n');
+        Sha256Hash txId = getTxId(), wTxId = getWTxId();
+        s.append(indent).append(txId);
+        if (!wTxId.equals(txId))
+            s.append(", wtxid ").append(wTxId);
+        s.append('\n');
+        int weight = getWeight();
+        int size = unsafeBitcoinSerialize().length;
+        int vsize = getVsize();
+        s.append(indent).append("weight: ").append(weight).append(" wu, ");
+        if (size != vsize)
+            s.append(vsize).append(" virtual bytes, ");
+        s.append(size).append(" bytes\n");
         if (updatedAt != null)
-            s.append("  updated: ").append(Utils.dateTimeFormat(updatedAt)).append('\n');
+            s.append(indent).append("updated: ").append(Utils.dateTimeFormat(updatedAt)).append('\n');
         if (version != 1)
-            s.append("  version ").append(version).append('\n');
+            s.append(indent).append("version ").append(version).append('\n');
+
         if (isTimeLocked()) {
-            s.append("  time locked until ");
+            s.append(indent).append("time locked until ");
             if (lockTime < LOCKTIME_THRESHOLD) {
                 s.append("block ").append(lockTime);
                 if (chain != null) {
@@ -725,108 +831,110 @@ public class Transaction extends ChildMessage {
             s.append('\n');
         }
         if (hasRelativeLockTime()) {
-            s.append("  has relative lock time\n");
+            s.append(indent).append("has relative lock time\n");
         }
         if (isOptInFullRBF()) {
-            s.append("  opts into full replace-by-fee\n");
+            s.append(indent).append("opts into full replace-by-fee\n");
         }
+        if (purpose != null)
+            s.append(indent).append("purpose: ").append(purpose).append('\n');
         if (isCoinBase()) {
-            String script;
-            String script2;
-            try {
-                script = inputs.get(0).getScriptSig().toString();
-                script2 = outputs.get(0).getScriptPubKey().toString();
-            } catch (ScriptException e) {
-                script = "???";
-                script2 = "???";
-            }
-            s.append("     == COINBASE TXN (scriptSig ").append(script)
-                .append(")  (scriptPubKey ").append(script2).append(")\n");
-            return s.toString();
-        }
-        if (!inputs.isEmpty()) {
+            s.append(indent).append("coinbase\n");
+        } else if (!inputs.isEmpty()) {
             int i = 0;
             for (TransactionInput in : inputs) {
-                s.append("     ");
+                s.append(indent).append("   ");
                 s.append("in   ");
 
                 try {
-                    String scriptSigStr = in.getScriptSig().toString();
-                    s.append(!Strings.isNullOrEmpty(scriptSigStr) ? scriptSigStr : "<no scriptSig>");
+                    s.append(in.getScriptSig());
                     final Coin value = in.getValue();
                     if (value != null)
-                        s.append(" ").append(value.toFriendlyString());
+                        s.append("  ").append(value.toFriendlyString());
+                    s.append('\n');
                     if (in.hasWitness()) {
-                        s.append("\n          ");
-                        s.append("witness:");
+                        s.append(indent).append("        witness:");
                         s.append(in.getWitness());
+                        s.append('\n');
                     }
-                    s.append("\n          ");
-                    s.append("outpoint:");
                     final TransactionOutPoint outpoint = in.getOutpoint();
-                    s.append(outpoint.toString());
                     final TransactionOutput connectedOutput = outpoint.getConnectedOutput();
+                    s.append(indent).append("        ");
                     if (connectedOutput != null) {
                         Script scriptPubKey = connectedOutput.getScriptPubKey();
-                        try {
-                            byte[] pubKeyHash = scriptPubKey.getPubKeyHash();
-                            s.append(" hash160:");
-                            s.append(Utils.HEX.encode(pubKeyHash));
-                        } catch (ScriptException x) {
-                            // ignore
-                        }
+                        ScriptType scriptType = scriptPubKey.getScriptType();
+                        if (scriptType != null)
+                            s.append(scriptType).append(" addr:").append(scriptPubKey.getToAddress(params));
+                        else
+                            s.append("unknown script type");
+                    } else {
+                        s.append("unconnected");
                     }
+                    s.append("  outpoint:").append(outpoint).append('\n');
                     if (in.hasSequence()) {
-                        s.append("\n          sequence:").append(Long.toHexString(in.getSequenceNumber()));
+                        s.append(indent).append("        sequence:").append(Long.toHexString(in.getSequenceNumber()));
                         if (in.isOptInFullRBF())
                             s.append(", opts into full RBF");
-                        if (version >=2 && in.hasRelativeLockTime())
+                        if (version >= 2 && in.hasRelativeLockTime())
                             s.append(", has RLT");
+                        s.append('\n');
                     }
                 } catch (Exception e) {
-                    s.append("[exception: ").append(e.getMessage()).append("]");
+                    s.append("[exception: ").append(e.getMessage()).append("]\n");
                 }
-                s.append('\n');
                 i++;
             }
         } else {
-            s.append("     ");
+            s.append(indent).append("   ");
             s.append("INCOMPLETE: No inputs!\n");
         }
         for (TransactionOutput out : outputs) {
-            s.append("     ");
+            s.append(indent).append("   ");
             s.append("out  ");
             try {
                 Script scriptPubKey = out.getScriptPubKey();
                 s.append(scriptPubKey.getChunks().size() > 0 ? scriptPubKey.toString() : "<no scriptPubKey>");
-                s.append(" ");
+                s.append("  ");
                 s.append(out.getValue().toFriendlyString());
-                if (!out.isAvailableForSpending()) {
-                    s.append(" Spent");
-                }
-                final TransactionInput spentBy = out.getSpentBy();
-                if (spentBy != null) {
-                    s.append(" by ");
-                    s.append(spentBy.getParentTransaction().getHashAsString());
-                }
                 s.append('\n');
+                s.append(indent).append("        ");
                 ScriptType scriptType = scriptPubKey.getScriptType();
                 if (scriptType != null)
-                    s.append("          " + scriptType + " addr:" + scriptPubKey.getToAddress(params));
+                    s.append(scriptType).append(" addr:").append(scriptPubKey.getToAddress(params));
+                else
+                    s.append("unknown script type");
+                if (!out.isAvailableForSpending()) {
+                    s.append("  spent");
+                    final TransactionInput spentBy = out.getSpentBy();
+                    if (spentBy != null) {
+                        s.append(" by:");
+                        s.append(spentBy.getParentTransaction().getTxId()).append(':')
+                                .append(spentBy.getIndex());
+                    }
+                }
+                s.append('\n');
             } catch (Exception e) {
-                s.append("[exception: ").append(e.getMessage()).append("]");
+                s.append("[exception: ").append(e.getMessage()).append("]\n");
             }
-            s.append('\n');
         }
         final Coin fee = getFee();
         if (fee != null) {
-            final int size = unsafeBitcoinSerialize().length;
-            s.append("     fee  ").append(fee.multiply(1000).divide(size).toFriendlyString()).append("/kB, ")
-                    .append(fee.toFriendlyString()).append(" for ").append(size).append(" bytes\n");
+            s.append(indent).append("   fee  ");
+            s.append(fee.multiply(1000).divide(weight).toFriendlyString()).append("/wu, ");
+            if (size != vsize)
+                s.append(fee.multiply(1000).divide(vsize).toFriendlyString()).append("/vkB, ");
+            s.append(fee.multiply(1000).divide(size).toFriendlyString()).append("/kB  ");
+            s.append(fee.toFriendlyString()).append('\n');
         }
-        if (purpose != null)
-            s.append("     prps ").append(purpose).append('\n');
         return s.toString();
+    }
+
+    /**
+     * Serializes the transaction into the Bitcoin network format and encodes it as hex string.
+     * @return raw transaction in hex format
+     */
+    public String toHexString() {
+        return Utils.HEX.encode(unsafeBitcoinSerialize());
     }
 
     /**
@@ -880,23 +988,34 @@ public class Transaction extends ChildMessage {
      * to understand the values of sigHash and anyoneCanPay: otherwise you can use the other form of this method
      * that sets them to typical defaults.
      *
-     * @throws ScriptException if the scriptPubKey is not a pay to address or pay to pubkey script.
+     * @throws ScriptException if the scriptPubKey is not a pay to address or P2PK script.
      */
     public TransactionInput addSignedInput(TransactionOutPoint prevOut, Script scriptPubKey, ECKey sigKey,
                                            SigHash sigHash, boolean anyoneCanPay) throws ScriptException {
         // Verify the API user didn't try to do operations out of order.
         checkState(!outputs.isEmpty(), "Attempting to sign tx without outputs.");
-        TransactionInput input = new TransactionInput(params, this, new byte[]{}, prevOut);
+        TransactionInput input = new TransactionInput(params, this, new byte[] {}, prevOut);
         addInput(input);
-        Sha256Hash hash = hashForSignature(inputs.size() - 1, scriptPubKey, sigHash, anyoneCanPay);
-        ECKey.ECDSASignature ecSig = sigKey.sign(hash);
-        TransactionSignature txSig = new TransactionSignature(ecSig, sigHash, anyoneCanPay);
-        if (ScriptPattern.isPayToPubKey(scriptPubKey))
-            input.setScriptSig(ScriptBuilder.createInputScript(txSig));
-        else if (ScriptPattern.isPayToPubKeyHash(scriptPubKey))
-            input.setScriptSig(ScriptBuilder.createInputScript(txSig, sigKey));
-        else
+        int inputIndex = inputs.size() - 1;
+        if (ScriptPattern.isP2PK(scriptPubKey)) {
+            TransactionSignature signature = calculateSignature(inputIndex, sigKey, scriptPubKey, sigHash,
+                    anyoneCanPay);
+            input.setScriptSig(ScriptBuilder.createInputScript(signature));
+            input.setWitness(null);
+        } else if (ScriptPattern.isP2PKH(scriptPubKey)) {
+            TransactionSignature signature = calculateSignature(inputIndex, sigKey, scriptPubKey, sigHash,
+                    anyoneCanPay);
+            input.setScriptSig(ScriptBuilder.createInputScript(signature, sigKey));
+            input.setWitness(null);
+        } else if (ScriptPattern.isP2WPKH(scriptPubKey)) {
+            Script scriptCode = ScriptBuilder.createP2PKHOutputScript(sigKey);
+            TransactionSignature signature = calculateWitnessSignature(inputIndex, sigKey, scriptCode, input.getValue(),
+                    sigHash, anyoneCanPay);
+            input.setScriptSig(ScriptBuilder.createEmpty());
+            input.setWitness(TransactionWitness.redeemP2WPKH(signature, sigKey));
+        } else {
             throw new ScriptException(ScriptError.SCRIPT_ERR_UNKNOWN_ERROR, "Don't know how to sign for this kind of scriptPubKey: " + scriptPubKey);
+        }
         return input;
     }
 
@@ -981,7 +1100,7 @@ public class Transaction extends ChildMessage {
      *
      * @param inputIndex Which input to calculate the signature for, as an index.
      * @param key The private key used to calculate the signature.
-     * @param redeemScript Byte-exact contents of the scriptPubKey that is being satisified, or the P2SH redeem script.
+     * @param redeemScript Byte-exact contents of the scriptPubKey that is being satisfied, or the P2SH redeem script.
      * @param hashType Signing mode, see the enum for documentation.
      * @param anyoneCanPay Signing mode, see the SigHash enum for documentation.
      * @return A newly calculated signature object that wraps the r, s and sighash components.
@@ -1000,7 +1119,7 @@ public class Transaction extends ChildMessage {
      *
      * @param inputIndex Which input to calculate the signature for, as an index.
      * @param key The private key used to calculate the signature.
-     * @param redeemScript The scriptPubKey that is being satisified, or the P2SH redeem script.
+     * @param redeemScript The scriptPubKey that is being satisfied, or the P2SH redeem script.
      * @param hashType Signing mode, see the enum for documentation.
      * @param anyoneCanPay Signing mode, see the SigHash enum for documentation.
      * @return A newly calculated signature object that wraps the r, s and sighash components.
@@ -1021,7 +1140,7 @@ public class Transaction extends ChildMessage {
      * @param inputIndex Which input to calculate the signature for, as an index.
      * @param key The private key used to calculate the signature.
      * @param aesKey The AES key to use for decryption of the private key. If null then no decryption is required.
-     * @param redeemScript Byte-exact contents of the scriptPubKey that is being satisified, or the P2SH redeem script.
+     * @param redeemScript Byte-exact contents of the scriptPubKey that is being satisfied, or the P2SH redeem script.
      * @param hashType Signing mode, see the enum for documentation.
      * @param anyoneCanPay Signing mode, see the SigHash enum for documentation.
      * @return A newly calculated signature object that wraps the r, s and sighash components.
@@ -1042,7 +1161,7 @@ public class Transaction extends ChildMessage {
      * @param inputIndex Which input to calculate the signature for, as an index.
      * @param key The private key used to calculate the signature.
      * @param aesKey The AES key to use for decryption of the private key. If null then no decryption is required.
-     * @param redeemScript The scriptPubKey that is being satisified, or the P2SH redeem script.
+     * @param redeemScript The scriptPubKey that is being satisfied, or the P2SH redeem script.
      * @param hashType Signing mode, see the enum for documentation.
      * @param anyoneCanPay Signing mode, see the SigHash enum for documentation.
      * @return A newly calculated signature object that wraps the r, s and sighash components.
@@ -1114,7 +1233,9 @@ public class Transaction extends ChildMessage {
             // transaction that step isn't very helpful, but it doesn't add much cost relative to the actual
             // EC math so we'll do it anyway.
             for (int i = 0; i < tx.inputs.size(); i++) {
-                tx.inputs.get(i).clearScriptBytes();
+                TransactionInput input = tx.inputs.get(i);
+                input.clearScriptBytes();
+                input.setWitness(null);
             }
 
             // This step has no purpose beyond being synchronized with Bitcoin Core's bugs. OP_CODESEPARATOR
@@ -1123,7 +1244,7 @@ public class Transaction extends ChildMessage {
             // the design we use today where scripts are executed independently but share a stack. This left the
             // OP_CODESEPARATOR instruction having no purpose as it was only meant to be used internally, not actually
             // ever put into scripts. Deleting OP_CODESEPARATOR is a step that should never be required but if we don't
-            // do it, we could split off the main chain.
+            // do it, we could split off the best chain.
             connectedScript = Script.removeAllInstancesOfOp(connectedScript, ScriptOpCodes.OP_CODESEPARATOR);
 
             // Set the input to the script of its output. Bitcoin Core does this but the step has no obvious purpose as
@@ -1166,12 +1287,12 @@ public class Transaction extends ChildMessage {
             if ((sigHashType & SigHash.ANYONECANPAY.value) == SigHash.ANYONECANPAY.value) {
                 // SIGHASH_ANYONECANPAY means the signature in the input is not broken by changes/additions/removals
                 // of other inputs. For example, this is useful for building assurance contracts.
-                tx.inputs = new ArrayList<TransactionInput>();
+                tx.inputs = new ArrayList<>();
                 tx.inputs.add(input);
             }
 
-            ByteArrayOutputStream bos = new UnsafeByteArrayOutputStream(tx.length == UNKNOWN_LENGTH ? 256 : tx.length + 4);
-            tx.bitcoinSerialize(bos);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(tx.length);
+            tx.bitcoinSerializeToStream(bos, false);
             // We also have to write a hash type (sigHashType is actually an unsigned char)
             uint32ToByteStreamLE(0x000000ff & sigHashType, bos);
             // Note that this is NOT reversed to ensure it will be signed correctly. If it were to be printed out
@@ -1185,10 +1306,158 @@ public class Transaction extends ChildMessage {
         }
     }
 
+    public TransactionSignature calculateWitnessSignature(
+            int inputIndex,
+            ECKey key,
+            byte[] scriptCode,
+            Coin value,
+            SigHash hashType,
+            boolean anyoneCanPay) {
+        Sha256Hash hash = hashForWitnessSignature(inputIndex, scriptCode, value, hashType, anyoneCanPay);
+        return new TransactionSignature(key.sign(hash), hashType, anyoneCanPay);
+    }
+
+    public TransactionSignature calculateWitnessSignature(
+            int inputIndex,
+            ECKey key,
+            Script scriptCode,
+            Coin value,
+            SigHash hashType,
+            boolean anyoneCanPay) {
+        return calculateWitnessSignature(inputIndex, key, scriptCode.getProgram(), value, hashType, anyoneCanPay);
+    }
+
+    public TransactionSignature calculateWitnessSignature(
+            int inputIndex,
+            ECKey key,
+            @Nullable KeyParameter aesKey,
+            byte[] scriptCode,
+            Coin value,
+            SigHash hashType,
+            boolean anyoneCanPay) {
+        Sha256Hash hash = hashForWitnessSignature(inputIndex, scriptCode, value, hashType, anyoneCanPay);
+        return new TransactionSignature(key.sign(hash, aesKey), hashType, anyoneCanPay);
+    }
+
+    public TransactionSignature calculateWitnessSignature(
+            int inputIndex,
+            ECKey key,
+            @Nullable KeyParameter aesKey,
+            Script scriptCode,
+            Coin value,
+            SigHash hashType,
+            boolean anyoneCanPay) {
+        return calculateWitnessSignature(inputIndex, key, aesKey, scriptCode.getProgram(), value, hashType, anyoneCanPay);
+    }
+
+    public synchronized Sha256Hash hashForWitnessSignature(
+            int inputIndex,
+            byte[] scriptCode,
+            Coin prevValue,
+            SigHash type,
+            boolean anyoneCanPay) {
+        int sigHash = TransactionSignature.calcSigHashValue(type, anyoneCanPay);
+        return hashForWitnessSignature(inputIndex, scriptCode, prevValue, (byte) sigHash);
+    }
+
+    /**
+     * <p>Calculates a signature hash, that is, a hash of a simplified form of the transaction. How exactly the transaction
+     * is simplified is specified by the type and anyoneCanPay parameters.</p>
+     *
+     * <p>This is a low level API and when using the regular {@link Wallet} class you don't have to call this yourself.
+     * When working with more complex transaction types and contracts, it can be necessary. When signing a Witness output
+     * the scriptCode should be the script encoded into the scriptSig field, for normal transactions, it's the
+     * scriptPubKey of the output you're signing for. (See BIP143: https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki)</p>
+     *
+     * @param inputIndex   input the signature is being calculated for. Tx signatures are always relative to an input.
+     * @param scriptCode   the script that should be in the given input during signing.
+     * @param prevValue    the value of the coin being spent
+     * @param type         Should be SigHash.ALL
+     * @param anyoneCanPay should be false.
+     */
+    public synchronized Sha256Hash hashForWitnessSignature(
+            int inputIndex,
+            Script scriptCode,
+            Coin prevValue,
+            SigHash type,
+            boolean anyoneCanPay) {
+        return hashForWitnessSignature(inputIndex, scriptCode.getProgram(), prevValue, type, anyoneCanPay);
+    }
+
+    public synchronized Sha256Hash hashForWitnessSignature(
+            int inputIndex,
+            byte[] scriptCode,
+            Coin prevValue,
+            byte sigHashType){
+        ByteArrayOutputStream bos = new UnsafeByteArrayOutputStream(length == UNKNOWN_LENGTH ? 256 : length + 4);
+        try {
+            byte[] hashPrevouts = new byte[32];
+            byte[] hashSequence = new byte[32];
+            byte[] hashOutputs = new byte[32];
+            int basicSigHashType = sigHashType & 0x1f;
+            boolean anyoneCanPay = (sigHashType & SigHash.ANYONECANPAY.value) == SigHash.ANYONECANPAY.value;
+            boolean signAll = (basicSigHashType != SigHash.SINGLE.value) && (basicSigHashType != SigHash.NONE.value);
+
+            if (!anyoneCanPay) {
+                ByteArrayOutputStream bosHashPrevouts = new UnsafeByteArrayOutputStream(256);
+                for (TransactionInput input : this.inputs) {
+                    bosHashPrevouts.write(input.getOutpoint().getHash().getReversedBytes());
+                    uint32ToByteStreamLE(input.getOutpoint().getIndex(), bosHashPrevouts);
+                }
+                hashPrevouts = Sha256Hash.hashTwice(bosHashPrevouts.toByteArray());
+            }
+
+            if (!anyoneCanPay && signAll) {
+                ByteArrayOutputStream bosSequence = new UnsafeByteArrayOutputStream(256);
+                for (TransactionInput input : this.inputs) {
+                    uint32ToByteStreamLE(input.getSequenceNumber(), bosSequence);
+                }
+                hashSequence = Sha256Hash.hashTwice(bosSequence.toByteArray());
+            }
+
+            if (signAll) {
+                ByteArrayOutputStream bosHashOutputs = new UnsafeByteArrayOutputStream(256);
+                for (TransactionOutput output : this.outputs) {
+                    uint64ToByteStreamLE(
+                            BigInteger.valueOf(output.getValue().getValue()),
+                            bosHashOutputs
+                    );
+                    bosHashOutputs.write(new VarInt(output.getScriptBytes().length).encode());
+                    bosHashOutputs.write(output.getScriptBytes());
+                }
+                hashOutputs = Sha256Hash.hashTwice(bosHashOutputs.toByteArray());
+            } else if (basicSigHashType == SigHash.SINGLE.value && inputIndex < outputs.size()) {
+                ByteArrayOutputStream bosHashOutputs = new UnsafeByteArrayOutputStream(256);
+                uint64ToByteStreamLE(
+                        BigInteger.valueOf(this.outputs.get(inputIndex).getValue().getValue()),
+                        bosHashOutputs
+                );
+                bosHashOutputs.write(new VarInt(this.outputs.get(inputIndex).getScriptBytes().length).encode());
+                bosHashOutputs.write(this.outputs.get(inputIndex).getScriptBytes());
+                hashOutputs = Sha256Hash.hashTwice(bosHashOutputs.toByteArray());
+            }
+            uint32ToByteStreamLE(version, bos);
+            bos.write(hashPrevouts);
+            bos.write(hashSequence);
+            bos.write(inputs.get(inputIndex).getOutpoint().getHash().getReversedBytes());
+            uint32ToByteStreamLE(inputs.get(inputIndex).getOutpoint().getIndex(), bos);
+            bos.write(new VarInt(scriptCode.length).encode());
+            bos.write(scriptCode);
+            uint64ToByteStreamLE(BigInteger.valueOf(prevValue.getValue()), bos);
+            uint32ToByteStreamLE(inputs.get(inputIndex).getSequenceNumber(), bos);
+            bos.write(hashOutputs);
+            uint32ToByteStreamLE(this.lockTime, bos);
+            uint32ToByteStreamLE(0x000000ff & sigHashType, bos);
+        } catch (IOException e) {
+            throw new RuntimeException(e);  // Cannot happen.
+        }
+
+        return Sha256Hash.twiceOf(bos.toByteArray());
+    }
+
     @Override
     protected void bitcoinSerializeToStream(OutputStream stream) throws IOException {
-        boolean useSegwit = hasWitnesses()
-                && protocolVersion >= NetworkParameters.ProtocolVersion.WITNESS_VERSION.getBitcoinProtocolVersion();
+        boolean useSegwit = hasWitnesses() && allowWitness();
         bitcoinSerializeToStream(stream, useSegwit);
     }
 
@@ -1329,7 +1598,7 @@ public class Transaction extends ChildMessage {
      */
     public TransactionConfidence getConfidence(TxConfidenceTable table) {
         if (confidence == null)
-            confidence = table.getOrCreate(getHash()) ;
+            confidence = table.getOrCreate(getTxId()) ;
         return confidence;
     }
 
@@ -1342,12 +1611,12 @@ public class Transaction extends ChildMessage {
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
-        return getHash().equals(((Transaction)o).getHash());
+        return getTxId().equals(((Transaction)o).getTxId());
     }
 
     @Override
     public int hashCode() {
-        return getHash().hashCode();
+        return getTxId().hashCode();
     }
 
     /**
@@ -1387,6 +1656,17 @@ public class Transaction extends ChildMessage {
         }
     }
 
+    /** Loops the outputs of a coinbase transaction to locate the witness commitment. */
+    public Sha256Hash findWitnessCommitment() {
+        checkState(isCoinBase());
+        for (TransactionOutput out : Lists.reverse(outputs)) {
+            Script scriptPubKey = out.getScriptPubKey();
+            if (ScriptPattern.isWitnessCommitment(scriptPubKey))
+                return ScriptPattern.extractWitnessCommitmentHash(scriptPubKey);
+        }
+        return null;
+    }
+
     /**
      * <p>Checks the transaction contents for sanity, in ways that can be done in a standalone manner.
      * Does <b>not</b> perform all checks on a transaction such as whether the inputs are already spent.
@@ -1409,25 +1689,25 @@ public class Transaction extends ChildMessage {
         if (this.getMessageSize() > Block.MAX_BLOCK_SIZE)
             throw new VerificationException.LargerThanMaxBlockSize();
 
-        Coin valueOut = Coin.ZERO;
         HashSet<TransactionOutPoint> outpoints = new HashSet<>();
         for (TransactionInput input : inputs) {
             if (outpoints.contains(input.getOutpoint()))
                 throw new VerificationException.DuplicatedOutPoint();
             outpoints.add(input.getOutpoint());
         }
-        try {
-            for (TransactionOutput output : outputs) {
-                if (output.getValue().signum() < 0)    // getValue() can throw IllegalStateException
-                    throw new VerificationException.NegativeValueOutput();
-                valueOut = valueOut.add(output.getValue());
-                if (params.hasMaxMoney() && valueOut.compareTo(params.getMaxMoney()) > 0)
-                    throw new IllegalArgumentException();
+
+        Coin valueOut = Coin.ZERO;
+        for (TransactionOutput output : outputs) {
+            Coin value = output.getValue();
+            if (value.signum() < 0)
+                throw new VerificationException.NegativeValueOutput();
+            try {
+                valueOut = valueOut.add(value);
+            } catch (ArithmeticException e) {
+                throw new VerificationException.ExcessiveValue();
             }
-        } catch (IllegalStateException e) {
-            throw new VerificationException.ExcessiveValue();
-        } catch (IllegalArgumentException e) {
-            throw new VerificationException.ExcessiveValue();
+            if (params.hasMaxMoney() && valueOut.compareTo(params.getMaxMoney()) > 0)
+                throw new VerificationException.ExcessiveValue();
         }
 
         if (isCoinBase()) {
@@ -1540,6 +1820,7 @@ public class Transaction extends ChildMessage {
     /**
      * Returns the transaction {@link #memo}.
      */
+    @Nullable
     public String getMemo() {
         return memo;
     }

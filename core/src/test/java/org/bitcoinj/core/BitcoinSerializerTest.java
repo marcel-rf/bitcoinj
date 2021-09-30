@@ -18,9 +18,11 @@
 package org.bitcoinj.core;
 
 import org.bitcoinj.params.MainNetParams;
+import org.bitcoinj.params.TestNet3Params;
 import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
 import java.net.InetAddress;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
@@ -65,11 +67,17 @@ public class BitcoinSerializerTest {
         assertEquals("10.0.0.1", peerAddress.getAddr().getHostAddress());
         ByteArrayOutputStream bos = new ByteArrayOutputStream(ADDRESS_MESSAGE_BYTES.length);
         serializer.serialize(addressMessage, bos);
-
         assertEquals(31, addressMessage.getMessageSize());
-        addressMessage.addAddress(new PeerAddress(MAINNET, InetAddress.getLocalHost()));
+
+        addressMessage.addAddress(new PeerAddress(MAINNET, InetAddress.getLocalHost(), MAINNET.getPort(),
+                BigInteger.ZERO, serializer.withProtocolVersion(1)));
+        bos = new ByteArrayOutputStream(61);
+        serializer.serialize(addressMessage, bos);
         assertEquals(61, addressMessage.getMessageSize());
+
         addressMessage.removeAddress(0);
+        bos = new ByteArrayOutputStream(31);
+        serializer.serialize(addressMessage, bos);
         assertEquals(31, addressMessage.getMessageSize());
 
         //this wont be true due to dynamic timestamps.
@@ -116,7 +124,7 @@ public class BitcoinSerializerTest {
         assertTrue(transaction.isCached());
         bos = new ByteArrayOutputStream();
         serializer.serialize(transaction, bos);
-        assertTrue(Arrays.equals(TRANSACTION_MESSAGE_BYTES, bos.toByteArray()));
+        assertArrayEquals(TRANSACTION_MESSAGE_BYTES, bos.toByteArray());
 
         // deserialize/reserialize to check for equals.  Set a field to it's existing value to trigger uncache
         transaction = (Transaction) serializer.deserialize(ByteBuffer.wrap(TRANSACTION_MESSAGE_BYTES));
@@ -127,7 +135,7 @@ public class BitcoinSerializerTest {
 
         bos = new ByteArrayOutputStream();
         serializer.serialize(transaction, bos);
-        assertTrue(Arrays.equals(TRANSACTION_MESSAGE_BYTES, bos.toByteArray()));
+        assertArrayEquals(TRANSACTION_MESSAGE_BYTES, bos.toByteArray());
     }
 
     /**
@@ -234,5 +242,12 @@ public class BitcoinSerializerTest {
         };
         ByteArrayOutputStream bos = new ByteArrayOutputStream(ADDRESS_MESSAGE_BYTES.length);
         serializer.serialize(unknownMessage, bos);
+    }
+
+    @Test
+    public void testEquals() {
+        assertTrue(MAINNET.getDefaultSerializer().equals(MAINNET.getDefaultSerializer()));
+        assertFalse(MAINNET.getDefaultSerializer().equals(TestNet3Params.get().getDefaultSerializer()));
+        assertFalse(MAINNET.getDefaultSerializer().equals(MAINNET.getDefaultSerializer().withProtocolVersion(0)));
     }
 }

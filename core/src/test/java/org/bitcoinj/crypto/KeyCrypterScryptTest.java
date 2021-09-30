@@ -17,21 +17,19 @@
 
 package org.bitcoinj.crypto;
 
-import org.bitcoinj.core.Utils;
-import org.bitcoinj.utils.BriefLogFormatter;
-import com.google.protobuf.ByteString;
-
-import org.bitcoinj.wallet.Protos;
-import org.bitcoinj.wallet.Protos.ScryptParameters;
-import org.junit.Before;
-import org.junit.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.fail;
 
 import java.util.Random;
 import java.util.UUID;
 
-import static org.junit.Assert.*;
+import org.bitcoinj.core.Utils;
+import org.junit.Before;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KeyCrypterScryptTest {
 
@@ -40,26 +38,21 @@ public class KeyCrypterScryptTest {
     // Nonsense bytes for encryption test.
     private static final byte[] TEST_BYTES1 = {0, -101, 2, 103, -4, 105, 6, 107, 8, -109, 10, 111, -12, 113, 14, -115, 16, 117, -18, 119, 20, 121, 22, 123, -24, 125, 26, 127, -28, 29, -30, 31};
 
+    private static final int SCRYPT_ITERATIONS = 256;
     private static final CharSequence PASSWORD1 = "aTestPassword";
     private static final CharSequence PASSWORD2 = "0123456789";
-
     private static final CharSequence WRONG_PASSWORD = "thisIsTheWrongPassword";
+    private static final CharSequence WRONG_PASSWORD2 = "anotherWrongPassword";
 
-    private ScryptParameters scryptParameters;
+    private KeyCrypterScrypt keyCrypter;
 
     @Before
     public void setUp() throws Exception {
-        Protos.ScryptParameters.Builder scryptParametersBuilder = Protos.ScryptParameters.newBuilder()
-                .setSalt(ByteString.copyFrom(KeyCrypterScrypt.randomSalt()));
-        scryptParameters = scryptParametersBuilder.build();
-
-        BriefLogFormatter.init();
+        keyCrypter = new KeyCrypterScrypt(SCRYPT_ITERATIONS);
     }
 
     @Test
     public void testKeyCrypterGood1() throws KeyCrypterException {
-        KeyCrypterScrypt keyCrypter = new KeyCrypterScrypt(scryptParameters);
-
         // Encrypt.
         EncryptedData data = keyCrypter.encrypt(TEST_BYTES1, keyCrypter.deriveKey(PASSWORD1));
         assertNotNull(data);
@@ -78,8 +71,6 @@ public class KeyCrypterScryptTest {
      */
     @Test
     public void testKeyCrypterGood2() {
-        KeyCrypterScrypt keyCrypter = new KeyCrypterScrypt(scryptParameters);
-
         // Trying random UUIDs for plainText and passwords.
         int numberOfTests = 16;
         for (int i = 0; i < numberOfTests; i++) {
@@ -98,30 +89,32 @@ public class KeyCrypterScryptTest {
 
     @Test
     public void testKeyCrypterWrongPassword() throws KeyCrypterException {
-        KeyCrypterScrypt keyCrypter = new KeyCrypterScrypt(scryptParameters);
-
         // create a longer encryption string
         StringBuilder builder = new StringBuilder();
         for (int i = 0; i < 100; i++) {
             builder.append(i).append(" The quick brown fox");
         }
 
-        EncryptedData data = keyCrypter.encrypt(builder.toString().getBytes(), keyCrypter.deriveKey(PASSWORD2));
+        byte[] plainText = builder.toString().getBytes();
+        EncryptedData data = keyCrypter.encrypt(plainText, keyCrypter.deriveKey(PASSWORD2));
         assertNotNull(data);
 
         try {
-            keyCrypter.decrypt(data, keyCrypter.deriveKey(WRONG_PASSWORD));
-            // TODO: This test sometimes fails due to relying on padding.
+            // This sometimes doesn't throw due to relying on padding...
+            byte[] cipherText = keyCrypter.decrypt(data, keyCrypter.deriveKey(WRONG_PASSWORD));
+            // ...so we also check for length, because that's the 2nd level test we're doing e.g. in ECKey/DeterministicKey...
+            assertNotEquals(plainText.length, cipherText.length);
+            // ...and then try with another wrong password again.
+            keyCrypter.decrypt(data, keyCrypter.deriveKey(WRONG_PASSWORD2));
+            // Note: it can still fail, but it should be extremely rare.
             fail("Decrypt with wrong password did not throw exception");
-        } catch (KeyCrypterException ede) {
-            assertTrue(ede.getMessage().contains("Could not decrypt"));
+        } catch (KeyCrypterException.InvalidCipherText x) {
+            // expected
         }
     }
 
     @Test
     public void testEncryptDecryptBytes1() throws KeyCrypterException {
-        KeyCrypterScrypt keyCrypter = new KeyCrypterScrypt(scryptParameters);
-
         // Encrypt bytes.
         EncryptedData data = keyCrypter.encrypt(TEST_BYTES1, keyCrypter.deriveKey(PASSWORD1));
         assertNotNull(data);
@@ -136,8 +129,6 @@ public class KeyCrypterScryptTest {
 
     @Test
     public void testEncryptDecryptBytes2() throws KeyCrypterException {
-        KeyCrypterScrypt keyCrypter = new KeyCrypterScrypt(scryptParameters);
-
         // Encrypt random bytes of various lengths up to length 50.
         Random random = new Random();
 

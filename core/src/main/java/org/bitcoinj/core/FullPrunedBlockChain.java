@@ -17,6 +17,7 @@
 
 package org.bitcoinj.core;
 
+import org.bitcoinj.params.AbstractBitcoinNetParams;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.Script.VerifyFlag;
 import org.bitcoinj.script.ScriptPattern;
@@ -121,7 +122,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
     protected StoredBlock addToBlockStore(StoredBlock storedPrev, Block block)
             throws BlockStoreException, VerificationException {
         StoredBlock newBlock = storedPrev.build(block);
-        blockStore.put(newBlock, new StoredUndoableBlock(newBlock.getHeader().getHash(), block.transactions));
+        blockStore.put(newBlock, new StoredUndoableBlock(newBlock.getHeader().getHash(), block.getTransactions()));
         return newBlock;
     }
 
@@ -172,7 +173,8 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
             try {
                 ListIterator<Script> prevOutIt = prevOutScripts.listIterator();
                 for (int index = 0; index < tx.getInputs().size(); index++) {
-                    tx.getInputs().get(index).getScriptSig().correctlySpends(tx, index, prevOutIt.next(), verifyFlags);
+                    tx.getInputs().get(index).getScriptSig().correctlySpends(tx, index, null, null, prevOutIt.next(),
+                            verifyFlags);
                 }
             } catch (VerificationException e) {
                 return e;
@@ -213,7 +215,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
     protected TransactionOutputChanges connectTransactions(int height, Block block)
             throws VerificationException, BlockStoreException {
         checkState(lock.isHeldByCurrentThread());
-        if (block.transactions == null)
+        if (block.getTransactions() == null)
             throw new RuntimeException("connectTransactions called with Block that didn't have transactions!");
         if (!params.passesCheckpoint(height, block.getHash()))
             throw new VerificationException("Block failed checkpoint lockin at " + height);
@@ -227,15 +229,15 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
         if (scriptVerificationExecutor.isShutdown())
             scriptVerificationExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
-        List<Future<VerificationException>> listScriptVerificationResults = new ArrayList<>(block.transactions.size());
+        List<Future<VerificationException>> listScriptVerificationResults = new ArrayList<>(block.getTransactions().size());
         try {
             if (!params.isCheckpoint(height)) {
                 // BIP30 violator blocks are ones that contain a duplicated transaction. They are all in the
                 // checkpoints list and we therefore only check non-checkpoints for duplicated transactions here. See the
                 // BIP30 document for more details on this: https://github.com/bitcoin/bips/blob/master/bip-0030.mediawiki
-                for (Transaction tx : block.transactions) {
+                for (Transaction tx : block.getTransactions()) {
                     final Set<VerifyFlag> verifyFlags = params.getTransactionVerificationFlags(block, tx, getVersionTally(), height);
-                    Sha256Hash hash = tx.getHash();
+                    Sha256Hash hash = tx.getTxId();
                     // If we already have unspent outputs for this hash, we saw the tx already. Either the block is
                     // being added twice (bug) or the block is a BIP30 violator.
                     if (blockStore.hasUnspentOutputs(hash, tx.getOutputs().size()))
@@ -246,7 +248,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
             }
             Coin totalFees = Coin.ZERO;
             Coin coinbaseValue = null;
-            for (final Transaction tx : block.transactions) {
+            for (final Transaction tx : block.getTransactions()) {
                 boolean isCoinBase = tx.isCoinBase();
                 Coin valueIn = Coin.ZERO;
                 Coin valueOut = Coin.ZERO;
@@ -272,7 +274,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                         // TODO: Check we're not spending the genesis transaction here. Bitcoin Core won't allow it.
                         valueIn = valueIn.add(prevOut.getValue());
                         if (verifyFlags.contains(VerifyFlag.P2SH)) {
-                            if (ScriptPattern.isPayToScriptHash(prevOut.getScript()))
+                            if (ScriptPattern.isP2SH(prevOut.getScript()))
                                 sigOps += Script.getP2SHSigOpCount(in.getScriptBytes());
                             if (sigOps > Block.MAX_BLOCK_SIGOPS)
                                 throw new VerificationException("Too many P2SH SigOps in block");
@@ -283,7 +285,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                         txOutsSpent.add(prevOut);
                     }
                 }
-                Sha256Hash hash = tx.getHash();
+                Sha256Hash hash = tx.getTxId();
                 for (TransactionOutput out : tx.getOutputs()) {
                     valueOut = valueOut.add(out.getValue());
                     // For each output, add it to the set of unspent outputs so it can be consumed in future.
@@ -316,7 +318,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                     listScriptVerificationResults.add(future);
                 }
             }
-            if (totalFees.compareTo(params.getMaxMoney()) > 0 || block.getBlockInflation(height).add(totalFees).compareTo(coinbaseValue) < 0)
+            if (totalFees.compareTo(params.getMaxMoney()) > 0 || getBlockInflation(height).add(totalFees).compareTo(coinbaseValue) < 0)
                 throw new VerificationException("Transaction fees out of range");
             for (Future<VerificationException> future : listScriptVerificationResults) {
                 VerificationException e;
@@ -331,11 +333,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                 if (e != null)
                     throw e;
             }
-        } catch (VerificationException e) {
-            scriptVerificationExecutor.shutdownNow();
-            blockStore.abortDatabaseBatchWrite();
-            throw e;
-        } catch (BlockStoreException e) {
+        } catch (VerificationException | BlockStoreException e) {
             scriptVerificationExecutor.shutdownNow();
             blockStore.abortDatabaseBatchWrite();
             throw e;
@@ -370,7 +368,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
 
                 if (!params.isCheckpoint(newBlock.getHeight())) {
                     for (Transaction tx : transactions) {
-                        Sha256Hash hash = tx.getHash();
+                        Sha256Hash hash = tx.getTxId();
                         if (blockStore.hasUnspentOutputs(hash, tx.getOutputs().size()))
                             throw new VerificationException("Block failed BIP30 test!");
                     }
@@ -400,7 +398,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                                 throw new VerificationException("Tried to spend coinbase at depth " + (newBlock.getHeight() - prevOut.getHeight()));
                             valueIn = valueIn.add(prevOut.getValue());
                             if (verifyFlags.contains(VerifyFlag.P2SH)) {
-                                if (ScriptPattern.isPayToScriptHash(prevOut.getScript()))
+                                if (ScriptPattern.isP2SH(prevOut.getScript()))
                                     sigOps += Script.getP2SHSigOpCount(in.getScriptBytes());
                                 if (sigOps > Block.MAX_BLOCK_SIGOPS)
                                     throw new VerificationException("Too many P2SH SigOps in block");
@@ -414,7 +412,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                             txOutsSpent.add(prevOut);
                         }
                     }
-                    Sha256Hash hash = tx.getHash();
+                    Sha256Hash hash = tx.getTxId();
                     for (TransactionOutput out : tx.getOutputs()) {
                         valueOut = valueOut.add(out.getValue());
                         Script script = getScript(out.getScriptBytes());
@@ -447,8 +445,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                         listScriptVerificationResults.add(future);
                     }
                 }
-                if (totalFees.compareTo(params.getMaxMoney()) > 0 ||
-                        newBlock.getHeader().getBlockInflation(newBlock.getHeight()).add(totalFees).compareTo(coinbaseValue) < 0)
+                if (totalFees.compareTo(params.getMaxMoney()) > 0 || getBlockInflation(newBlock.getHeight()).add(totalFees).compareTo(coinbaseValue) < 0)
                     throw new VerificationException("Transaction fees out of range");
                 txOutChanges = new TransactionOutputChanges(txOutsCreated, txOutsSpent);
                 for (Future<VerificationException> future : listScriptVerificationResults) {
@@ -477,11 +474,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                 for (UTXO out : txOutChanges.txOutsSpent)
                     blockStore.removeUnspentTransactionOutput(out);
             }
-        } catch (VerificationException e) {
-            scriptVerificationExecutor.shutdownNow();
-            blockStore.abortDatabaseBatchWrite();
-            throw e;
-        } catch (BlockStoreException e) {
+        } catch (VerificationException | BlockStoreException e) {
             scriptVerificationExecutor.shutdownNow();
             blockStore.abortDatabaseBatchWrite();
             throw e;
@@ -505,10 +498,7 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
                 blockStore.addUnspentTransactionOutput(out);
             for (UTXO out : txOutChanges.txOutsCreated)
                 blockStore.removeUnspentTransactionOutput(out);
-        } catch (PrunedException e) {
-            blockStore.abortDatabaseBatchWrite();
-            throw e;
-        } catch (BlockStoreException e) {
+        } catch (PrunedException | BlockStoreException e) {
             blockStore.abortDatabaseBatchWrite();
             throw e;
         }
@@ -530,5 +520,9 @@ public class FullPrunedBlockChain extends AbstractBlockChain {
     protected StoredBlock getStoredBlockInCurrentScope(Sha256Hash hash) throws BlockStoreException {
         checkState(lock.isHeldByCurrentThread());
         return blockStore.getOnceUndoableStoredBlock(hash);
+    }
+
+    private Coin getBlockInflation(int height) {
+        return ((AbstractBitcoinNetParams) params).getBlockInflation(height);
     }
 }

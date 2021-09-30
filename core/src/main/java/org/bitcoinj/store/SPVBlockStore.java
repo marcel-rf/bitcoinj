@@ -39,15 +39,14 @@ import static com.google.common.base.Preconditions.*;
  */
 public class SPVBlockStore implements BlockStore {
     private static final Logger log = LoggerFactory.getLogger(SPVBlockStore.class);
+    protected final ReentrantLock lock = Threading.lock(SPVBlockStore.class);
 
     /** The default number of headers that will be stored in the ring buffer. */
-    public static final int DEFAULT_CAPACITY = 5000;
+    public static final int DEFAULT_CAPACITY = 10000;
     public static final String HEADER_MAGIC = "SPVB";
 
     protected volatile MappedByteBuffer buffer;
     protected final NetworkParameters params;
-
-    protected ReentrantLock lock = Threading.lock("SPVBlockStore");
 
     // The entire ring-buffer is mmapped and accessing it should be as fast as accessing regular memory once it's
     // faulted in. Unfortunately, in theory practice and theory are the same. In practice they aren't.
@@ -288,6 +287,7 @@ public class SPVBlockStore implements BlockStore {
         try {
             buffer.force();
             buffer = null;  // Allow it to be GCd and the underlying file mapping to go away.
+            fileLock.release();
             randomAccessFile.close();
             blockCache.clear();
         } catch (IOException e) {
@@ -324,5 +324,23 @@ public class SPVBlockStore implements BlockStore {
     private void setRingCursor(ByteBuffer buffer, int newCursor) {
         checkArgument(newCursor >= 0);
         buffer.putInt(4, newCursor);
+    }
+
+    public void clear() throws Exception {
+        lock.lock();
+        try {
+            // Clear caches
+            blockCache.clear();
+            notFoundCache.clear();
+            // Clear file content
+            buffer.position(0);
+            long fileLength = randomAccessFile.length();
+            for (int i = 0; i < fileLength; i++) {
+                buffer.put((byte)0);
+            }
+            // Initialize store again
+            buffer.position(0);
+            initNewStore(params);
+        } finally { lock.unlock(); }
     }
 }

@@ -16,6 +16,8 @@
 
 package org.bitcoinj.core;
 
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import org.bitcoinj.net.AbstractTimeoutHandler;
 import org.bitcoinj.net.MessageWriteTarget;
 import org.bitcoinj.net.NioClient;
@@ -43,6 +45,7 @@ import static com.google.common.base.Preconditions.*;
  */
 public abstract class PeerSocketHandler extends AbstractTimeoutHandler implements StreamConnection {
     private static final Logger log = LoggerFactory.getLogger(PeerSocketHandler.class);
+    private final Lock lock = Threading.lock(PeerSocketHandler.class);
 
     private final MessageSerializer serializer;
     protected PeerAddress peerAddress;
@@ -57,8 +60,6 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
     private byte[] largeReadBuffer;
     private int largeReadBufferPos;
     private BitcoinSerializer.BitcoinPacketHeader header;
-
-    private Lock lock = Threading.lock("PeerSocketHandler");
 
     public PeerSocketHandler(NetworkParameters params, InetSocketAddress remoteIp) {
         checkNotNull(params);
@@ -77,7 +78,7 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
      * the peer will have received it. Throws NotYetConnectedException if we are not yet connected to the remote peer.
      * TODO: Maybe use something other than the unchecked NotYetConnectedException here
      */
-    public void sendMessage(Message message) throws NotYetConnectedException {
+    public ListenableFuture sendMessage(Message message) throws NotYetConnectedException {
         lock.lock();
         try {
             if (writeTarget == null)
@@ -89,9 +90,10 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try {
             serializer.serialize(message, out);
-            writeTarget.writeBytes(out.toByteArray());
+            return writeTarget.writeBytes(out.toByteArray());
         } catch (IOException e) {
             exceptionCaught(e);
+            return Futures.immediateFailedFuture(e);
         }
     }
 

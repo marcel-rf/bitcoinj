@@ -63,8 +63,8 @@ public class BasicKeyChainTest {
 
     @Test
     public void importKeys() {
+        Utils.setMockClock();
         long now = Utils.currentTimeSeconds();
-        Utils.setMockClock(now);
         final ECKey key1 = new ECKey();
         Utils.rollMockClock(86400);
         final ECKey key2 = new ECKey();
@@ -233,7 +233,7 @@ public class BasicKeyChainTest {
     @Test
     public void watching() throws UnreadableWalletException {
         ECKey key1 = new ECKey();
-        ECKey pub = ECKey.fromPublicOnly(key1.getPubKeyPoint());
+        ECKey pub = ECKey.fromPublicOnly(key1);
         chain.importKeys(pub);
         assertEquals(1, chain.numKeys());
         List<Protos.Key> keys = chain.serializeToProtobuf();

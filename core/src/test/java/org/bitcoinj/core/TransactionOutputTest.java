@@ -80,13 +80,17 @@ public class TransactionOutputTest extends TestWithWallet {
         Transaction tx = new Transaction(MAINNET);
         tx.addOutput(Coin.CENT, ScriptBuilder.createOpReturnScript("hello world!".getBytes()));
         assertTrue(ScriptPattern.isOpReturn(tx.getOutput(0).getScriptPubKey()));
-        assertFalse(ScriptPattern.isPayToPubKey(tx.getOutput(0).getScriptPubKey()));
-        assertFalse(ScriptPattern.isPayToPubKeyHash(tx.getOutput(0).getScriptPubKey()));
+        assertFalse(ScriptPattern.isP2PK(tx.getOutput(0).getScriptPubKey()));
+        assertFalse(ScriptPattern.isP2PKH(tx.getOutput(0).getScriptPubKey()));
     }
 
     @Test
     public void getMinNonDustValue() throws Exception {
-        TransactionOutput payToAddressOutput = new TransactionOutput(UNITTEST, null, Coin.COIN, myAddress);
-        assertEquals(Transaction.MIN_NONDUST_OUTPUT, payToAddressOutput.getMinNonDustValue());
+        TransactionOutput p2pk = new TransactionOutput(UNITTEST, null, Coin.COIN, myKey);
+        assertEquals(Coin.valueOf(576), p2pk.getMinNonDustValue());
+        TransactionOutput p2pkh = new TransactionOutput(UNITTEST, null, Coin.COIN, LegacyAddress.fromKey(UNITTEST, myKey));
+        assertEquals(Coin.valueOf(546), p2pkh.getMinNonDustValue());
+        TransactionOutput p2wpkh = new TransactionOutput(UNITTEST, null, Coin.COIN, SegwitAddress.fromKey(UNITTEST, myKey));
+        assertEquals(Coin.valueOf(294), p2wpkh.getMinNonDustValue());
     }
 }

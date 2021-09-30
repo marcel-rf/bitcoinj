@@ -1,5 +1,6 @@
 /*
  * Copyright 2013 Google Inc.
+ * Copyright 2019 Andreas Schildbach
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +22,6 @@ import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptException;
 import org.bitcoinj.script.ScriptPattern;
 
-import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,7 +53,7 @@ public class KeyTimeCoinSelector implements CoinSelector {
     @Override
     public CoinSelection select(Coin target, List<TransactionOutput> candidates) {
         try {
-            LinkedList<TransactionOutput> gathered = Lists.newLinkedList();
+            LinkedList<TransactionOutput> gathered = new LinkedList<>();
             Coin valueGathered = Coin.ZERO;
             for (TransactionOutput output : candidates) {
                 if (ignorePending && !isConfirmed(output))
@@ -62,10 +62,12 @@ public class KeyTimeCoinSelector implements CoinSelector {
                 // We ignore any other kind of exotic output on the assumption we can't spend it ourselves.
                 final Script scriptPubKey = output.getScriptPubKey();
                 ECKey controllingKey;
-                if (ScriptPattern.isPayToPubKey(scriptPubKey)) {
-                    controllingKey = wallet.findKeyFromPubKey(ScriptPattern.extractKeyFromPayToPubKey(scriptPubKey));
-                } else if (ScriptPattern.isPayToPubKeyHash(scriptPubKey)) {
-                    controllingKey = wallet.findKeyFromPubHash(ScriptPattern.extractHashFromPayToPubKeyHash(scriptPubKey));
+                if (ScriptPattern.isP2PK(scriptPubKey)) {
+                    controllingKey = wallet.findKeyFromPubKey(ScriptPattern.extractKeyFromP2PK(scriptPubKey));
+                } else if (ScriptPattern.isP2PKH(scriptPubKey)) {
+                    controllingKey = wallet.findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2PKH(scriptPubKey), Script.ScriptType.P2PKH);
+                } else if (ScriptPattern.isP2WPKH(scriptPubKey)) {
+                    controllingKey = wallet.findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2WH(scriptPubKey), Script.ScriptType.P2WPKH);
                 } else {
                     log.info("Skipping tx output {} because it's not of simple form.", output);
                     continue;

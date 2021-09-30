@@ -22,9 +22,11 @@ import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.Utils;
 import org.bitcoinj.crypto.*;
 import org.bitcoinj.script.Script;
+import org.bitcoinj.utils.ListenerRegistration;
 import org.bitcoinj.utils.Threading;
 import org.bitcoinj.wallet.listeners.KeyChainEventListener;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
@@ -32,7 +34,7 @@ import com.google.common.collect.PeekingIterator;
 import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.spongycastle.crypto.params.KeyParameter;
+import org.bouncycastle.crypto.params.KeyParameter;
 
 import javax.annotation.Nullable;
 import java.math.BigInteger;
@@ -42,8 +44,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.*;
-import static com.google.common.collect.Lists.newArrayList;
-import static com.google.common.collect.Lists.newLinkedList;
 
 /**
  * <p>A deterministic key chain is a {@link KeyChain} that uses the
@@ -65,7 +65,7 @@ import static com.google.common.collect.Lists.newLinkedList;
  * sufficient information about the account key to create a watching chain via
  * {@link DeterministicKey#deserializeB58(DeterministicKey, String, NetworkParameters)}
  * (with null as the first parameter) and then
- * {@link DeterministicKeyChain#DeterministicKeyChain(DeterministicKey)}.</p>
+ * {@link Builder#watch(DeterministicKey)}.</p>
  *
  * <p>This class builds on {@link DeterministicHierarchy} and
  * {@link DeterministicKey} by adding support for serialization to and from protobufs,
@@ -98,14 +98,15 @@ import static com.google.common.collect.Lists.newLinkedList;
 @SuppressWarnings("PublicStaticCollectionField")
 public class DeterministicKeyChain implements EncryptableKeyChain {
     private static final Logger log = LoggerFactory.getLogger(DeterministicKeyChain.class);
-    public static final String DEFAULT_PASSPHRASE_FOR_MNEMONIC = "";
+    protected final ReentrantLock lock = Threading.lock(DeterministicKeyChain.class);
 
-    protected final ReentrantLock lock = Threading.lock("DeterministicKeyChain");
+    public static final String DEFAULT_PASSPHRASE_FOR_MNEMONIC = "";
 
     private DeterministicHierarchy hierarchy;
     @Nullable private DeterministicKey rootKey;
     @Nullable private DeterministicSeed seed;
-    @Nullable private final ImmutableList<ChildNumber> accountPath;
+    private final Script.ScriptType outputScriptType;
+    private final HDPath accountPath;
 
     // Paths through the key tree. External keys are ones that are communicated to other parties. Internal keys are
     // keys created for change addresses, coinbases, mixing, etc - anything that isn't communicated. The distinction
@@ -113,12 +114,15 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
     // that feature yet. In future we might hand out different accounts for cases where we wish to hand payers
     // a payment request that can generate lots of addresses independently.
     // The account path may be overridden by subclasses.
-    public static final ImmutableList<ChildNumber> ACCOUNT_ZERO_PATH = ImmutableList.of(ChildNumber.ZERO_HARDENED);
+    // m / 0'
+    public static final HDPath ACCOUNT_ZERO_PATH = HDPath.M(ChildNumber.ZERO_HARDENED);
+    // m / 1'
+    public static final HDPath ACCOUNT_ONE_PATH = HDPath.M(ChildNumber.ONE_HARDENED);
     // m / 44' / 0' / 0'
-    public static final ImmutableList<ChildNumber> BIP44_ACCOUNT_ZERO_PATH = ImmutableList.of(new ChildNumber(44, true),
-            ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED);
-    public static final ImmutableList<ChildNumber> EXTERNAL_SUBPATH = ImmutableList.of(ChildNumber.ZERO);
-    public static final ImmutableList<ChildNumber> INTERNAL_SUBPATH = ImmutableList.of(ChildNumber.ONE);
+    public static final HDPath BIP44_ACCOUNT_ZERO_PATH = HDPath.M(new ChildNumber(44, true))
+                        .extend(ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED);
+    public static final HDPath EXTERNAL_SUBPATH = HDPath.M(ChildNumber.ZERO);
+    public static final HDPath INTERNAL_SUBPATH = HDPath.M(ChildNumber.ONE);
 
     // We try to ensure we have at least this many keys ready and waiting to be handed out via getKey().
     // See docs for getLookaheadSize() for more info on what this is for. The -1 value means it hasn't been calculated
@@ -162,12 +166,16 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
 
     public static class Builder<T extends Builder<T>> {
         protected SecureRandom random;
-        protected int bits = 128;
+        protected int bits = DeterministicSeed.DEFAULT_SEED_ENTROPY_BITS;
         protected String passphrase;
-        protected long seedCreationTimeSecs;
+        protected long creationTimeSecs = 0;
         protected byte[] entropy;
         protected DeterministicSeed seed;
-        protected DeterministicKey watchingKey;
+        protected Script.ScriptType outputScriptType = Script.ScriptType.P2PKH;
+        protected DeterministicKey watchingKey = null;
+        protected boolean isFollowing = false;
+        protected DeterministicKey spendingKey = null;
+        protected HDPath accountPath = null;
 
         protected Builder() {
         }
@@ -182,8 +190,9 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
          * if the starting entropy is the same. You should provide the creation time in seconds since the UNIX epoch for the
          * seed: this lets us know from what part of the chain we can expect to see derived keys appear.
          */
-        public T entropy(byte[] entropy) {
+        public T entropy(byte[] entropy, long creationTimeSecs) {
             this.entropy = entropy;
+            this.creationTimeSecs = creationTimeSecs;
             return self();
         }
 
@@ -220,13 +229,39 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             return self();
         }
 
-        public T watchingKey(DeterministicKey watchingKey) {
-            this.watchingKey = watchingKey;
+        /**
+         * Creates a key chain that watches the given account key.
+         */
+        public T watch(DeterministicKey accountKey) {
+            checkState(accountPath == null, "either watch or accountPath");
+            this.watchingKey = accountKey;
+            this.isFollowing = false;
             return self();
         }
 
-        public T seedCreationTimeSecs(long seedCreationTimeSecs) {
-            this.seedCreationTimeSecs = seedCreationTimeSecs;
+        /**
+         * Creates a deterministic key chain with the given watch key and that follows some other keychain. In a married
+         * wallet following keychain represents "spouse". Watch key has to be an account key.
+         */
+        public T watchAndFollow(DeterministicKey accountKey) {
+            checkState(accountPath == null, "either watchAndFollow or accountPath");
+            this.watchingKey = accountKey;
+            this.isFollowing = true;
+            return self();
+        }
+
+        /**
+         * Creates a key chain that can spend from the given account key.
+         */
+        public T spend(DeterministicKey accountKey) {
+            checkState(accountPath == null, "either spend or accountPath");
+            this.spendingKey = accountKey;
+            this.isFollowing = false;
+            return self();
+        }
+
+        public T outputScriptType(Script.ScriptType outputScriptType) {
+            this.outputScriptType = outputScriptType;
             return self();
         }
 
@@ -237,25 +272,36 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             return self();
         }
 
+        /**
+         * Use an account path other than the default {@link DeterministicKeyChain#ACCOUNT_ZERO_PATH}.
+         */
+        public T accountPath(List<ChildNumber> accountPath) {
+            checkState(watchingKey == null, "either watch or accountPath");
+            this.accountPath = HDPath.M(checkNotNull(accountPath));
+            return self();
+        }
+
         public DeterministicKeyChain build() {
-            checkState(random != null || entropy != null || seed != null || watchingKey!= null, "Must provide either entropy or random or seed or watchingKey");
             checkState(passphrase == null || seed == null, "Passphrase must not be specified with seed");
-            DeterministicKeyChain chain;
 
-            if (random != null) {
+            if (accountPath == null)
+                accountPath = ACCOUNT_ZERO_PATH;
+
+            if (random != null)
                 // Default passphrase to "" if not specified
-                chain = new DeterministicKeyChain(random, bits, getPassphrase(), seedCreationTimeSecs);
-            } else if (entropy != null) {
-                chain = new DeterministicKeyChain(entropy, getPassphrase(), seedCreationTimeSecs);
-            } else if (seed != null) {
-                seed.setCreationTimeSeconds(seedCreationTimeSecs);
-                chain = new DeterministicKeyChain(seed);
-            } else {
-                watchingKey.setCreationTimeSeconds(seedCreationTimeSecs);
-                chain = new DeterministicKeyChain(watchingKey);
-            }
-
-            return chain;
+                return new DeterministicKeyChain(new DeterministicSeed(random, bits, getPassphrase()), null,
+                        outputScriptType, accountPath);
+            else if (entropy != null)
+                return new DeterministicKeyChain(new DeterministicSeed(entropy, getPassphrase(), creationTimeSecs),
+                        null, outputScriptType, accountPath);
+            else if (seed != null)
+                return new DeterministicKeyChain(seed, null, outputScriptType, accountPath);
+            else if (watchingKey != null)
+                return new DeterministicKeyChain(watchingKey, isFollowing, true, outputScriptType);
+            else if (spendingKey != null)
+                return new DeterministicKeyChain(spendingKey, false, false, outputScriptType);
+            else
+                throw new IllegalStateException();
         }
 
         protected String getPassphrase() {
@@ -268,79 +314,22 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
     }
 
     /**
-     * Generates a new key chain with entropy selected randomly from the given {@link SecureRandom}
-     * object and the default entropy size.
-     */
-    public DeterministicKeyChain(SecureRandom random) {
-        this(random, DeterministicSeed.DEFAULT_SEED_ENTROPY_BITS, DEFAULT_PASSPHRASE_FOR_MNEMONIC, Utils.currentTimeSeconds());
-    }
-
-    /**
-     * Generates a new key chain with entropy selected randomly from the given {@link SecureRandom}
-     * object and of the requested size in bits.
-     */
-    public DeterministicKeyChain(SecureRandom random, int bits) {
-        this(random, bits, DEFAULT_PASSPHRASE_FOR_MNEMONIC, Utils.currentTimeSeconds());
-    }
-
-    /**
-     * Generates a new key chain with entropy selected randomly from the given {@link SecureRandom}
-     * object and of the requested size in bits.  The derived seed is further protected with a user selected passphrase
-     * (see BIP 39).
-     */
-    public DeterministicKeyChain(SecureRandom random, int bits, String passphrase, long seedCreationTimeSecs) {
-        this(new DeterministicSeed(random, bits, passphrase, seedCreationTimeSecs));
-    }
-
-    /**
-     * Creates a deterministic key chain starting from the given entropy. All keys yielded by this chain will be the same
-     * if the starting seed is the same. You should provide the creation time in seconds since the UNIX epoch for the
-     * seed: this lets us know from what part of the chain we can expect to see derived keys appear.
-     */
-    public DeterministicKeyChain(byte[] entropy, String passphrase, long seedCreationTimeSecs) {
-        this(new DeterministicSeed(entropy, passphrase, seedCreationTimeSecs));
-    }
-
-    /**
-     * Creates a deterministic key chain starting from the given seed. All keys yielded by this chain will be the same
-     * if the starting seed is the same.
-     */
-    protected DeterministicKeyChain(DeterministicSeed seed) {
-        this(seed, null, ACCOUNT_ZERO_PATH);
-    }
-
-    /**
-     * Creates a deterministic key chain starting from the given seed. This deterministic Key chain
-     * will follow the account path defined.
-     */
-    public DeterministicKeyChain(DeterministicSeed seed, ImmutableList<ChildNumber> accountPath) {
-        this(seed, null, accountPath);
-    }
-
-    /**
-     * Creates a deterministic key chain that watches the given (public only) root key. You can use this to calculate
-     * balances and generally follow along, but spending is not possible with such a chain.
-     */
-    public DeterministicKeyChain(DeterministicKey watchingKey) {
-        checkArgument(watchingKey.isPubKeyOnly(), "Private subtrees not currently supported: if you got this key from DKC.getWatchingKey() then use .dropPrivate().dropParent() on it first.");
-        this.accountPath = watchingKey.getPath();
-        basicKeyChain = new BasicKeyChain();
-        this.seed = null;
-        this.rootKey = null;
-        basicKeyChain.importKey(watchingKey);
-        hierarchy = new DeterministicHierarchy(watchingKey);
-        initializeHierarchyUnencrypted(watchingKey);
-    }
-
-    /**
-     * Creates a deterministic key chain from a watched or spendable account key.  If  {@code isWatching} flag is set,
-     * then creates a deterministic key chain that watches the given (public only) root key.  You can use this to calculate
-     * balances and generally follow along, but spending is not possible with such a chain.  If it is not set, then this
-     * creates a deterministic key chain that allows spending. If {@code isFollowing} flag is set(only allowed
-     * if {@code isWatching} is set) then this keychain follows some other keychain.  In a married wallet following
+     * <p>
+     * Creates a deterministic key chain from a watched or spendable account key. If {@code isWatching} flag is set,
+     * then creates a deterministic key chain that watches the given (public only) root key. You can use this to
+     * calculate balances and generally follow along, but spending is not possible with such a chain. If it is not set,
+     * then this creates a deterministic key chain that allows spending. If {@code isFollowing} flag is set(only allowed
+     * if {@code isWatching} is set) then this keychain follows some other keychain. In a married wallet following
      * keychain represents "spouse's" keychain.
+     * </p>
+     * 
+     * <p>
+     * This constructor is not stable across releases! If you need a stable API, use {@link #builder()} to use a
+     * {@link Builder}.
+     * </p>
      */
-    public DeterministicKeyChain(DeterministicKey key, boolean isFollowing, boolean isWatching) {
+    public DeterministicKeyChain(DeterministicKey key, boolean isFollowing, boolean isWatching,
+            Script.ScriptType outputScriptType) {
         if (isWatching)
             checkArgument(key.isPubKeyOnly(), "Private subtrees not currently supported for watching keys: if you got this key from DKC.getWatchingKey() then use .dropPrivate().dropParent() on it first.");
         else
@@ -353,57 +342,28 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         basicKeyChain.importKey(key);
         hierarchy = new DeterministicHierarchy(key);
         this.accountPath = key.getPath();
+        this.outputScriptType = outputScriptType;
         initializeHierarchyUnencrypted(key);
         this.isFollowing = isFollowing;
     }
 
     /**
-     * <p>Creates a deterministic key chain with the given watch key. If {@code isFollowing} flag is set then this keychain follows
-     * some other keychain. In a married wallet following keychain represents "spouse's" keychain.</p>
-     * <p>Watch key has to be an account key.</p>
-     */
-    protected DeterministicKeyChain(DeterministicKey watchKey, boolean isFollowing) {
-        this(watchKey);
-        this.isFollowing = isFollowing;
-    }
-
-    /**
-     * Creates a deterministic key chain with the given watch key and that follows some other keychain. In a married
-     * wallet following keychain represents "spouse"
-     * Watch key has to be an account key.
-     */
-    public static DeterministicKeyChain watchAndFollow(DeterministicKey watchKey) {
-        return new DeterministicKeyChain(watchKey, true);
-    }
-
-    /**
-     * Creates a key chain that watches the given account key.
-     */
-    public static DeterministicKeyChain watch(DeterministicKey accountKey) {
-        return new DeterministicKeyChain(accountKey);
-    }
-
-    /**
-     * Creates a key chain that can spend from the given account key.
-     */
-    public static DeterministicKeyChain spend(DeterministicKey accountKey) {
-        return new DeterministicKeyChain(accountKey, false, false);
-    }
-
-    /**
-     * For use in {@link KeyChainFactory} during deserialization.
-     */
-    protected DeterministicKeyChain(DeterministicSeed seed, @Nullable KeyCrypter crypter) {
-        this(seed, crypter, ACCOUNT_ZERO_PATH);
-    }
-
-    /**
-     * Creates a deterministic key chain with an encrypted deterministic seed using the provided account path.
-     *  Using {@link KeyCrypter KeyCrypter} to decrypt.
+     * <p>
+     * Creates a deterministic key chain with an encrypted deterministic seed using the provided account path. Using
+     * {@link KeyCrypter KeyCrypter} to decrypt.
+     * </p>
+     * 
+     * <p>
+     * This constructor is not stable across releases! If you need a stable API, use {@link #builder()} to use a
+     * {@link Builder}.
+     * </p>
      */
     protected DeterministicKeyChain(DeterministicSeed seed, @Nullable KeyCrypter crypter,
-                                    ImmutableList<ChildNumber> accountPath) {
-        this.accountPath = accountPath;
+            Script.ScriptType outputScriptType, List<ChildNumber> accountPath) {
+        checkArgument(outputScriptType == null || outputScriptType == Script.ScriptType.P2PKH
+                || outputScriptType == Script.ScriptType.P2WPKH, "Only P2PKH or P2WPKH allowed.");
+        this.outputScriptType = outputScriptType != null ? outputScriptType : Script.ScriptType.P2PKH;
+        this.accountPath = HDPath.M(accountPath);
         this.seed = seed;
         basicKeyChain = new BasicKeyChain(crypter);
         if (!seed.isEncrypted()) {
@@ -425,7 +385,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
      * For use in encryption when {@link #toEncrypted(KeyCrypter, KeyParameter)} is called, so that
      * subclasses can override that method and create an instance of the right class.
      *
-     * See also {@link #makeKeyChainFromSeed(DeterministicSeed, ImmutableList)}
+     * See also {@link #makeKeyChainFromSeed(DeterministicSeed, List, Script.ScriptType)}
      */
     protected DeterministicKeyChain(KeyCrypter crypter, KeyParameter aesKey, DeterministicKeyChain chain) {
         // Can't encrypt a watching chain.
@@ -434,6 +394,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
 
         checkArgument(!chain.rootKey.isEncrypted(), "Chain already encrypted");
         this.accountPath = chain.getAccountPath();
+        this.outputScriptType = chain.outputScriptType;
 
         this.issuedExternalKeys = chain.issuedExternalKeys;
         this.issuedInternalKeys = chain.issuedInternalKeys;
@@ -452,8 +413,8 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             encryptNonLeaf(aesKey, chain, rootKey, getAccountPath().subList(0, i));
         }
         DeterministicKey account = encryptNonLeaf(aesKey, chain, rootKey, getAccountPath());
-        externalParentKey = encryptNonLeaf(aesKey, chain, account, HDUtils.concat(getAccountPath(), EXTERNAL_SUBPATH));
-        internalParentKey = encryptNonLeaf(aesKey, chain, account, HDUtils.concat(getAccountPath(), INTERNAL_SUBPATH));
+        externalParentKey = encryptNonLeaf(aesKey, chain, account, getAccountPath().extend(EXTERNAL_SUBPATH));
+        internalParentKey = encryptNonLeaf(aesKey, chain, account, getAccountPath().extend(INTERNAL_SUBPATH));
 
         // Now copy the (pubkey only) leaf keys across to avoid rederiving them. The private key bytes are missing
         // anyway so there's nothing to encrypt.
@@ -466,17 +427,21 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             hierarchy.putKey(key);
             basicKeyChain.importKey(key);
         }
+        for (ListenerRegistration<KeyChainEventListener> listener : chain.basicKeyChain.getListeners()) {
+            basicKeyChain.addEventListener(listener);
+        }
     }
 
-    /** Override in subclasses to use a different account derivation path */
-    protected ImmutableList<ChildNumber> getAccountPath() {
-        if (accountPath != null)
-            return accountPath;
-        return ACCOUNT_ZERO_PATH;
+    public HDPath getAccountPath() {
+        return accountPath;
+    }
+
+    public Script.ScriptType getOutputScriptType() {
+        return outputScriptType;
     }
 
     private DeterministicKey encryptNonLeaf(KeyParameter aesKey, DeterministicKeyChain chain,
-                                            DeterministicKey parent, ImmutableList<ChildNumber> path) {
+                                            DeterministicKey parent, List<ChildNumber> path) {
         DeterministicKey key = chain.hierarchy.get(path, false, false);
         key = key.encrypt(checkNotNull(basicKeyChain.getKeyCrypter()), aesKey, parent);
         hierarchy.putKey(key);
@@ -542,7 +507,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             basicKeyChain.importKeys(lookahead);
             List<DeterministicKey> keys = new ArrayList<>(numberOfKeys);
             for (int i = 0; i < numberOfKeys; i++) {
-                ImmutableList<ChildNumber> path = HDUtils.append(parentKey.getPath(), new ChildNumber(index - numberOfKeys + i, false));
+                HDPath path = parentKey.getPath().extend(new ChildNumber(index - numberOfKeys + i, false));
                 DeterministicKey k = hierarchy.get(path, false, false);
                 // Just a last minute sanity check before we hand the key out to the app for usage. This isn't inspired
                 // by any real problem reports from bitcoinj users, but I've heard of cases via the grapevine of
@@ -652,7 +617,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
 
     /** Returns the deterministic key for the given absolute path in the hierarchy. */
     protected DeterministicKey getKeyByPath(ChildNumber... path) {
-        return getKeyByPath(ImmutableList.copyOf(path));
+        return getKeyByPath(HDPath.M(Arrays.asList(path)));
     }
 
     /** Returns the deterministic key for the given absolute path in the hierarchy. */
@@ -665,11 +630,16 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         return hierarchy.get(path, false, create);
     }
 
+    @Nullable
+    public DeterministicKey getRootKey() {
+        return rootKey;
+    }
+
     /**
      * <p>An alias for {@code getKeyByPath(getAccountPath())}.</p>
      *
      * <p>Use this when you would like to create a watching key chain that follows this one, but can't spend money from it.
-     * The returned key can be serialized and then passed into {@link #watch(DeterministicKey)}
+     * The returned key can be serialized and then passed into {@link Builder#watch(DeterministicKey)}
      * on another system to watch the hierarchy.</p>
      *
      * <p>Note that the returned key is not pubkey only unless this key chain already is: the returned key can still
@@ -762,7 +732,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
 
     @Override
     public List<Protos.Key> serializeToProtobuf() {
-        List<Protos.Key> result = newArrayList();
+        List<Protos.Key> result = new ArrayList<>();
         lock.lock();
         try {
             result.addAll(serializeMyselfToProtobuf());
@@ -775,7 +745,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
     protected List<Protos.Key> serializeMyselfToProtobuf() {
         // Most of the serialization work is delegated to the basic key chain, which will serialize the bulk of the
         // data (handling encryption along the way), and letting us patch it up with the extra data we care about.
-        LinkedList<Protos.Key> entries = newLinkedList();
+        LinkedList<Protos.Key> entries = new LinkedList<>();
         if (seed != null) {
             Protos.Key.Builder mnemonicEntry = BasicKeyChain.serializeEncryptableItem(seed);
             mnemonicEntry.setType(Protos.Key.Type.DETERMINISTIC_MNEMONIC);
@@ -790,7 +760,7 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             DeterministicKey key = (DeterministicKey) entry.getKey();
             Protos.Key.Builder proto = entry.getValue();
             proto.setType(Protos.Key.Type.DETERMINISTIC_KEY);
-            final Protos.DeterministicKey.Builder detKey = proto.getDeterministicKeyBuilder();
+            final Protos.DeterministicKey.Builder detKey = proto.getDeterministicKey().toBuilder();
             detKey.setChainCode(ByteString.copyFrom(key.getChainCode()));
             for (ChildNumber num : key.getPath())
                 detKey.addPath(num.i());
@@ -807,9 +777,12 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             if (entries.isEmpty() && isFollowing()) {
                 detKey.setIsFollowing(true);
             }
+            proto.setDeterministicKey(detKey);
             if (key.getParent() != null) {
                 // HD keys inherit the timestamp of their parent if they have one, so no need to serialize it.
                 proto.clearCreationTimestamp();
+            } else {
+                proto.setOutputScriptType(Protos.Key.OutputScriptType.valueOf(outputScriptType.name()));
             }
             entries.add(proto.build());
         }
@@ -825,20 +798,21 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
      * key rotation it can happen that there are multiple chains found.
      */
     public static List<DeterministicKeyChain> fromProtobuf(List<Protos.Key> keys, @Nullable KeyCrypter crypter, KeyChainFactory factory) throws UnreadableWalletException {
-        List<DeterministicKeyChain> chains = newLinkedList();
+        List<DeterministicKeyChain> chains = new LinkedList<>();
         DeterministicSeed seed = null;
         DeterministicKeyChain chain = null;
 
         int lookaheadSize = -1;
         int sigsRequiredToSpend = 1;
 
-        List<ChildNumber> accountPath = newArrayList();
+        List<ChildNumber> accountPath = new ArrayList<>();
+        Script.ScriptType outputScriptType = Script.ScriptType.P2PKH;
         PeekingIterator<Protos.Key> iter = Iterators.peekingIterator(keys.iterator());
         while (iter.hasNext()) {
             Protos.Key key = iter.next();
             final Protos.Key.Type t = key.getType();
             if (t == Protos.Key.Type.DETERMINISTIC_MNEMONIC) {
-                accountPath = newArrayList();
+                accountPath = new ArrayList<>();
                 for (int i : key.getAccountPathList()) {
                     accountPath.add(new ChildNumber(i));
                 }
@@ -884,12 +858,14 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
                     throw new UnreadableWalletException("Deterministic key missing extra data: " + key.toString());
                 byte[] chainCode = key.getDeterministicKey().getChainCode().toByteArray();
                 // Deserialize the path through the tree.
-                LinkedList<ChildNumber> path = newLinkedList();
+                LinkedList<ChildNumber> path = new LinkedList<>();
                 for (int i : key.getDeterministicKey().getPathList())
                     path.add(new ChildNumber(i));
                 // Deserialize the public key and path.
                 LazyECPoint pubkey = new LazyECPoint(ECKey.CURVE.getCurve(), key.getPublicKey().toByteArray());
-                final ImmutableList<ChildNumber> immutablePath = ImmutableList.copyOf(path);
+                final HDPath immutablePath = HDPath.M(path);
+                if (key.hasOutputScriptType())
+                    outputScriptType = Script.ScriptType.valueOf(key.getOutputScriptType().name());
                 // Possibly create the chain, if we didn't already do so yet.
                 boolean isWatchingAccountKey = false;
                 boolean isFollowingKey = false;
@@ -915,16 +891,17 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
                     if (seed == null && key.hasSecretBytes()) {
                         DeterministicKey accountKey = new DeterministicKey(immutablePath, chainCode, pubkey, new BigInteger(1, key.getSecretBytes().toByteArray()), null);
                         accountKey.setCreationTimeSeconds(key.getCreationTimestamp() / 1000);
-                        chain = factory.makeSpendingKeyChain(key, iter.peek(), accountKey, isMarried);
+                        chain = factory.makeSpendingKeyChain(accountKey, isMarried, outputScriptType);
                         isSpendingKey = true;
                     } else if (seed == null) {
                         DeterministicKey accountKey = new DeterministicKey(immutablePath, chainCode, pubkey, null, null);
                         accountKey.setCreationTimeSeconds(key.getCreationTimestamp() / 1000);
-                        chain = factory.makeWatchingKeyChain(key, iter.peek(), accountKey, isFollowingKey, isMarried);
+                        chain = factory.makeWatchingKeyChain(accountKey, isFollowingKey, isMarried,
+                                outputScriptType);
                         isWatchingAccountKey = true;
                     } else {
-                        chain = factory.makeKeyChain(key, iter.peek(), seed, crypter, isMarried,
-                                ImmutableList.<ChildNumber> builder().addAll(accountPath).build());
+                        chain = factory.makeKeyChain(seed, crypter, isMarried,
+                                outputScriptType, HDPath.M(accountPath));
                         chain.lookaheadSize = LAZY_CALCULATE_LOOKAHEAD;
                         // If the seed is encrypted, then the chain is incomplete at this point. However, we will load
                         // it up below as we parse in the keys. We just need to check at the end that we've loaded
@@ -1042,10 +1019,10 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         checkState(seed.isEncrypted());
         String passphrase = DEFAULT_PASSPHRASE_FOR_MNEMONIC; // FIXME allow non-empty passphrase
         DeterministicSeed decSeed = seed.decrypt(getKeyCrypter(), passphrase, aesKey);
-        DeterministicKeyChain chain = makeKeyChainFromSeed(decSeed, getAccountPath());
+        DeterministicKeyChain chain = makeKeyChainFromSeed(decSeed, getAccountPath(), outputScriptType);
         // Now double check that the keys match to catch the case where the key is wrong but padding didn't catch it.
         if (!chain.getWatchingKey().getPubKeyPoint().equals(getWatchingKey().getPubKeyPoint()))
-            throw new KeyCrypterException("Provided AES key is wrong");
+            throw new KeyCrypterException.PublicPrivateMismatch("Provided AES key is wrong");
         chain.lookaheadSize = lookaheadSize;
         // Now copy the (pubkey only) leaf keys across to avoid rederiving them. The private key bytes are missing
         // anyway so there's nothing to decrypt.
@@ -1061,6 +1038,9 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         }
         chain.issuedExternalKeys = issuedExternalKeys;
         chain.issuedInternalKeys = issuedInternalKeys;
+        for (ListenerRegistration<KeyChainEventListener> listener : basicKeyChain.getListeners()) {
+            chain.basicKeyChain.addEventListener(listener);
+        }
         return chain;
     }
 
@@ -1069,8 +1049,9 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
      * Subclasses should override this to create an instance of the subclass instead of a plain DKC.
      * This is used in encryption/decryption.
      */
-    protected DeterministicKeyChain makeKeyChainFromSeed(DeterministicSeed seed, ImmutableList<ChildNumber> accountPath) {
-        return new DeterministicKeyChain(seed, accountPath);
+    protected DeterministicKeyChain makeKeyChainFromSeed(DeterministicSeed seed, List<ChildNumber> accountPath,
+            Script.ScriptType outputScriptType) {
+        return new DeterministicKeyChain(seed, null, outputScriptType, accountPath);
     }
 
     @Override
@@ -1290,11 +1271,11 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
     }
 
     // For internal usage only
-    /* package */ List<ECKey> getKeys(boolean includeLookahead, boolean includeParents) {
+    /* package */ List<DeterministicKey> getKeys(boolean includeLookahead, boolean includeParents) {
         List<ECKey> keys = basicKeyChain.getKeys();
+        List<DeterministicKey> result = new LinkedList<>();
         if (!includeLookahead) {
             int treeSize = internalParentKey.getPath().size();
-            List<ECKey> issuedKeys = new LinkedList<>();
             for (ECKey key : keys) {
                 DeterministicKey detkey = (DeterministicKey) key;
                 DeterministicKey parent = detkey.getParent();
@@ -1302,20 +1283,23 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
                 if (!includeParents && detkey.getPath().size() <= treeSize) continue;
                 if (internalParentKey.equals(parent) && detkey.getChildNumber().i() >= issuedInternalKeys) continue;
                 if (externalParentKey.equals(parent) && detkey.getChildNumber().i() >= issuedExternalKeys) continue;
-                issuedKeys.add(detkey);
+                result.add(detkey);
             }
-            return issuedKeys;
+        } else {
+            for (ECKey key : keys)
+                result.add((DeterministicKey) key);
+            // TODO includeParents is ignored here
         }
-        return keys;
+        return result;
     }
 
     /**
      * Returns only the external keys that have been issued by this chain, lookahead not included.
      */
-    public List<ECKey> getIssuedReceiveKeys() {
-        final List<ECKey> keys = new ArrayList<>(getKeys(false, false));
-        for (Iterator<ECKey> i = keys.iterator(); i.hasNext();) {
-            DeterministicKey parent = ((DeterministicKey) i.next()).getParent();
+    public List<DeterministicKey> getIssuedReceiveKeys() {
+        final List<DeterministicKey> keys = new ArrayList<>(getKeys(false, false));
+        for (Iterator<DeterministicKey> i = keys.iterator(); i.hasNext();) {
+            DeterministicKey parent = i.next().getParent();
             if (parent == null || !externalParentKey.equals(parent))
                 i.remove();
         }
@@ -1342,9 +1326,9 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         // the seed.
         if (seed.isEncrypted() && seed.getEncryptedSeedData() != null) {
             EncryptedData data = seed.getEncryptedSeedData();
-            proto.getEncryptedDeterministicSeedBuilder()
+            proto.setEncryptedDeterministicSeed(proto.getEncryptedDeterministicSeed().toBuilder()
                     .setEncryptedPrivateKey(ByteString.copyFrom(data.encryptedBytes))
-                    .setInitialisationVector(ByteString.copyFrom(data.initialisationVector));
+                    .setInitialisationVector(ByteString.copyFrom(data.initialisationVector)));
             // We don't allow mixing of encryption types at the moment.
             checkState(seed.getEncryptionType() == Protos.Wallet.EncryptionType.ENCRYPTED_SCRYPT_AES);
         } else {
@@ -1386,35 +1370,65 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         throw new UnsupportedOperationException();
     }
 
-    public String toString(boolean includePrivateKeys, @Nullable KeyParameter aesKey, NetworkParameters params) {
+    @Override
+    public String toString() {
+        MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(this).omitNullValues();
+        helper.addValue(outputScriptType);
+        helper.add("accountPath", accountPath);
+        helper.add("lookaheadSize", lookaheadSize);
+        helper.add("lookaheadThreshold", lookaheadThreshold);
+        if (isFollowing)
+            helper.addValue("following");
+        return helper.toString();
+    }
+
+    public String toString(boolean includeLookahead, boolean includePrivateKeys, @Nullable KeyParameter aesKey, NetworkParameters params) {
         final DeterministicKey watchingKey = getWatchingKey();
         final StringBuilder builder = new StringBuilder();
         if (seed != null) {
             if (includePrivateKeys) {
                 DeterministicSeed decryptedSeed = seed.isEncrypted()
-                        ? seed.decrypt(getKeyCrypter(), DEFAULT_PASSPHRASE_FOR_MNEMONIC, aesKey) : seed;
+                        ? seed.decrypt(getKeyCrypter(), DEFAULT_PASSPHRASE_FOR_MNEMONIC, aesKey)
+                        : seed;
                 final List<String> words = decryptedSeed.getMnemonicCode();
-                builder.append("Seed as words: ").append(Utils.SPACE_JOINER.join(words)).append('\n');
-                builder.append("Seed as hex:   ").append(decryptedSeed.toHexString()).append('\n');
+                builder.append("Seed as words:     ").append(Utils.SPACE_JOINER.join(words)).append('\n');
+                builder.append("Seed as hex:       ").append(decryptedSeed.toHexString()).append('\n');
             } else {
                 if (seed.isEncrypted())
                     builder.append("Seed is encrypted\n");
             }
-            builder.append("Seed birthday: ").append(seed.getCreationTimeSeconds()).append("  [")
+            builder.append("Seed birthday:     ").append(seed.getCreationTimeSeconds()).append("  [")
                     .append(Utils.dateTimeFormat(seed.getCreationTimeSeconds() * 1000)).append("]\n");
         } else {
-            builder.append("Key birthday:  ").append(watchingKey.getCreationTimeSeconds()).append("  [")
+            builder.append("Key birthday:      ").append(watchingKey.getCreationTimeSeconds()).append("  [")
                     .append(Utils.dateTimeFormat(watchingKey.getCreationTimeSeconds() * 1000)).append("]\n");
         }
-        builder.append("Key to watch:  ").append(watchingKey.serializePubB58(params)).append('\n');
-        formatAddresses(includePrivateKeys, aesKey, params, builder);
+        builder.append("Ouput script type: ").append(outputScriptType).append('\n');
+        builder.append("Key to watch:      ").append(watchingKey.serializePubB58(params, outputScriptType))
+                .append('\n');
+        builder.append("Lookahead siz/thr: ").append(lookaheadSize).append('/').append(lookaheadThreshold).append('\n');
+        formatAddresses(includeLookahead, includePrivateKeys, aesKey, params, builder);
         return builder.toString();
     }
 
-    protected void formatAddresses(boolean includePrivateKeys, @Nullable KeyParameter aesKey, NetworkParameters params,
-            StringBuilder builder) {
-        for (ECKey key : getKeys(false, true))
-            key.formatKeyWithAddress(includePrivateKeys, aesKey, builder, params);
+    protected void formatAddresses(boolean includeLookahead, boolean includePrivateKeys, @Nullable KeyParameter aesKey,
+            NetworkParameters params, StringBuilder builder) {
+        for (DeterministicKey key : getKeys(includeLookahead, true)) {
+            String comment = null;
+            if (key.equals(getRootKey()))
+                comment = "root";
+            else if (key.equals(getWatchingKey()))
+                comment = "account";
+            else if (key.equals(internalParentKey))
+                comment = "internal";
+            else if (key.equals(externalParentKey))
+                comment = "external";
+            else if (internalParentKey.equals(key.getParent()) && key.getChildNumber().i() >= issuedInternalKeys)
+                comment = "*";
+            else if (externalParentKey.equals(key.getParent()) && key.getChildNumber().i() >= issuedExternalKeys)
+                comment = "*";
+            key.formatKeyWithAddress(includePrivateKeys, aesKey, builder, params, outputScriptType, comment);
+        }
     }
 
     /** The number of signatures required to spend coins received by this keychain. */

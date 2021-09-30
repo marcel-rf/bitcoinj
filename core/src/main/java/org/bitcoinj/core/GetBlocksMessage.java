@@ -19,8 +19,6 @@ package org.bitcoinj.core;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * <p>Represents the "getblocks" P2P network message, which requests the hashes of the parts of the block chain we're
@@ -31,12 +29,12 @@ import java.util.List;
 public class GetBlocksMessage extends Message {
 
     protected long version;
-    protected List<Sha256Hash> locator;
+    protected BlockLocator locator;
     protected Sha256Hash stopHash;
 
-    public GetBlocksMessage(NetworkParameters params, List<Sha256Hash> locator, Sha256Hash stopHash) {
+    public GetBlocksMessage(NetworkParameters params, BlockLocator locator, Sha256Hash stopHash) {
         super(params);
-        this.version = protocolVersion;
+        this.version = serializer.getProtocolVersion();
         this.locator = locator;
         this.stopHash = stopHash;
     }
@@ -49,18 +47,18 @@ public class GetBlocksMessage extends Message {
     protected void parse() throws ProtocolException {
         cursor = offset;
         version = readUint32();
-        int startCount = (int) readVarInt();
+        int startCount = readVarInt().intValue();
         if (startCount > 500)
             throw new ProtocolException("Number of locators cannot be > 500, received: " + startCount);
         length = cursor - offset + ((startCount + 1) * 32);
-        locator = new ArrayList<>(startCount);
+        locator = new BlockLocator();
         for (int i = 0; i < startCount; i++) {
-            locator.add(readHash());
+            locator = locator.add(readHash());
         }
         stopHash = readHash();
     }
 
-    public List<Sha256Hash> getLocator() {
+    public BlockLocator getLocator() {
         return locator;
     }
 
@@ -70,18 +68,18 @@ public class GetBlocksMessage extends Message {
 
     @Override
     public String toString() {
-        return "getblocks: " + Utils.SPACE_JOINER.join(locator);
+        return "getblocks: " + locator.toString();
     }
 
     @Override
     protected void bitcoinSerializeToStream(OutputStream stream) throws IOException {
         // Version, for some reason.
-        Utils.uint32ToByteStreamLE(params.getProtocolVersionNum(NetworkParameters.ProtocolVersion.CURRENT), stream);
+        Utils.uint32ToByteStreamLE(serializer.getProtocolVersion(), stream);
         // Then a vector of block hashes. This is actually a "block locator", a set of block
         // identifiers that spans the entire chain with exponentially increasing gaps between
         // them, until we end up at the genesis block. See CBlockLocator::Set()
         stream.write(new VarInt(locator.size()).encode());
-        for (Sha256Hash hash : locator) {
+        for (Sha256Hash hash : locator.getHashes()) {
             // Have to reverse as wire format is little endian.
             stream.write(hash.getReversedBytes());
         }
@@ -95,13 +93,12 @@ public class GetBlocksMessage extends Message {
         if (o == null || getClass() != o.getClass()) return false;
         GetBlocksMessage other = (GetBlocksMessage) o;
         return version == other.version && stopHash.equals(other.stopHash) &&
-            locator.size() == other.locator.size() && locator.containsAll(other.locator); // ignores locator ordering
+            locator.size() == other.locator.size() && locator.equals(other.locator); // ignores locator ordering
     }
 
     @Override
     public int hashCode() {
-        int hashCode = (int)version ^ "getblocks".hashCode() ^ stopHash.hashCode();
-        for (Sha256Hash aLocator : locator) hashCode ^= aLocator.hashCode(); // ignores locator ordering
-        return hashCode;
+        int hashCode = (int) version ^ "getblocks".hashCode() ^ stopHash.hashCode();
+        return hashCode ^= locator.hashCode();
     }
 }
