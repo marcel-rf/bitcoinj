@@ -29,6 +29,14 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigInteger;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 import static org.bitcoinj.core.Utils.HEX;
 
 import static org.bitcoinj.core.Utils.uint32ToByteStreamLE;
@@ -166,6 +174,52 @@ public class TransactionTest {
 
         tx.getConfidence().setConfidenceType(ConfidenceType.DEAD);
         assertEquals(tx.isMature(), false);
+    }
+
+    @Test
+    public void addSignedInput_P2PKH() throws Exception {
+        final Address toAddr = Address.fromKey(TESTNET, new ECKey(), Script.ScriptType.P2PKH);
+        final Sha256Hash utxo_id = Sha256Hash.wrap("81b4c832d70cb56ff957589752eb4125a4cab78a25a8fc52d6a09e5bd4404d48");
+        final Coin inAmount = Coin.ofSat(91234);
+        final Coin outAmount = Coin.ofSat(91234);
+
+        ECKey fromKey = new ECKey();
+        Address fromAddress = Address.fromKey(TESTNET, fromKey, Script.ScriptType.P2PKH);
+        Transaction tx = new Transaction(TESTNET);
+        TransactionOutPoint outPoint = new TransactionOutPoint(TESTNET, 0, utxo_id);
+        TransactionOutput output = new TransactionOutput(TESTNET, null, inAmount, fromAddress);
+        tx.addOutput(outAmount, toAddr);
+        TransactionInput input = tx.addSignedInput(outPoint, ScriptBuilder.createOutputScript(fromAddress), inAmount, fromKey);
+
+        // verify signature
+        input.getScriptSig().correctlySpends(tx, 0, null, null, ScriptBuilder.createOutputScript(fromAddress), null);
+
+        byte[] rawTx = tx.bitcoinSerialize();
+
+        assertNotNull(rawTx);
+    }
+
+    @Test
+    public void addSignedInput_P2WPKH() throws Exception {
+        final Address toAddr = Address.fromKey(TESTNET, new ECKey(), Script.ScriptType.P2WPKH);
+        final Sha256Hash utxo_id = Sha256Hash.wrap("81b4c832d70cb56ff957589752eb4125a4cab78a25a8fc52d6a09e5bd4404d48");
+        final Coin inAmount = Coin.ofSat(91234);
+        final Coin outAmount = Coin.ofSat(91234);
+
+        ECKey fromKey = new ECKey();
+        Address fromAddress = Address.fromKey(TESTNET, fromKey, Script.ScriptType.P2WPKH);
+        Transaction tx = new Transaction(TESTNET);
+        TransactionOutPoint outPoint = new TransactionOutPoint(TESTNET, 0, utxo_id);
+        tx.addOutput(outAmount, toAddr);
+        TransactionInput input = tx.addSignedInput(outPoint, ScriptBuilder.createOutputScript(fromAddress), inAmount, fromKey);
+
+        // verify signature
+        input.getScriptSig().correctlySpends(tx, 0, input.getWitness(), input.getValue(),
+                ScriptBuilder.createOutputScript(fromAddress), null);
+
+        byte[] rawTx = tx.bitcoinSerialize();
+
+        assertNotNull(rawTx);
     }
 
     @Test
@@ -464,14 +518,14 @@ public class TransactionTest {
     public void testAddSignedInputThrowsExceptionWhenScriptIsNotToRawPubKeyAndIsNotToAddress() {
         ECKey key = new ECKey();
         Address addr = LegacyAddress.fromKey(UNITTEST, key);
-        Transaction fakeTx = FakeTxBuilder.createFakeTx(UNITTEST, Coin.COIN, addr);
+        TransactionOutput fakeOutput = FakeTxBuilder.createFakeTx(UNITTEST, Coin.COIN, addr).getOutput(0);
 
         Transaction tx = new Transaction(UNITTEST);
-        tx.addOutput(fakeTx.getOutput(0));
+        tx.addOutput(fakeOutput);
 
         Script script = ScriptBuilder.createOpReturnScript(new byte[0]);
 
-        tx.addSignedInput(fakeTx.getOutput(0).getOutPointFor(), script, key);
+        tx.addSignedInput(fakeOutput.getOutPointFor(), script, fakeOutput.getValue(), key);
     }
 
     @Test
@@ -526,7 +580,7 @@ public class TransactionTest {
      * Ensure that hashForSignature() doesn't modify a transaction's data, which could wreak multithreading havoc.
      */
     @Test
-    public void testHashForSignatureThreadSafety() {
+    public void testHashForSignatureThreadSafety() throws Exception {
         Block genesis = UNITTEST.getGenesisBlock();
         Block block1 = genesis.createNextBlock(LegacyAddress.fromKey(UNITTEST, new ECKey()),
                     genesis.getTransactions().get(0).getOutput(0).getOutPointFor());
@@ -538,22 +592,40 @@ public class TransactionTest {
                 new byte[0],
                 Transaction.SigHash.ALL.byteValue())
                 .toString();
-
-        for (int i = 0; i < 100; i++) {
+        final Runnable runnable = () -> {
             // ensure the transaction object itself was not modified; if it was, the hash will change
             assertEquals(txHash, tx.getTxId());
-            new Thread(){
-                public void run() {
-                    assertEquals(
-                            txNormalizedHash,
-                            tx.hashForSignature(
+            assertEquals(
+                    txNormalizedHash,
+                    tx.hashForSignature(
                                     0,
                                     new byte[0],
                                     Transaction.SigHash.ALL.byteValue())
-                                    .toString());
-                }
-            };
-        }
+                            .toString());
+            assertEquals(txHash, tx.getTxId());
+        };
+        final int nThreads = 100;
+        ExecutorService executor = Executors.newFixedThreadPool(nThreads); // do our best to run as parallel as possible
+        // Build a stream of nThreads CompletableFutures and convert to an array
+        CompletableFuture<Void>[] results = Stream
+                .generate(() -> CompletableFuture.runAsync(runnable, executor))
+                .limit(nThreads)
+                .toArray(genericArray(CompletableFuture[]::new));
+        executor.shutdown();
+        CompletableFuture.allOf(results).get();  // we're just interested in the exception, if any
+    }
+
+    /**
+     * Function used to create/cast generic array to expected type. Using this function prevents us from
+     * needing a {@code @SuppressWarnings("unchecked")} in the calling code.
+     * @param arrayCreator Array constructor lambda taking an integer size parameter and returning array of type T
+     * @param <T> The erased type
+     * @param <R> The desired type
+     * @return Array constructor lambda taking an integer size parameter and returning array of type R
+     */
+    @SuppressWarnings("unchecked")
+    static <T, R extends T> IntFunction<R[]> genericArray(IntFunction<T[]> arrayCreator) {
+        return size -> (R[]) arrayCreator.apply(size);
     }
 
     @Test
@@ -668,7 +740,7 @@ public class TransactionTest {
 
     @Test
     public void nonSegwitZeroInputZeroOutputTx() {
-        // Non SegWit tx with zero input and outputs
+        // Non segwit tx with zero input and outputs
         String txHex = "010000000000f1f2f3f4";
         Transaction tx = UNITTEST.getDefaultSerializer().makeTransaction(HEX.decode(txHex));
         assertEquals(txHex, tx.toHexString());
@@ -676,8 +748,8 @@ public class TransactionTest {
 
     @Test
     public void nonSegwitZeroInputOneOutputTx() {
-        // Non SegWit tx with zero input and one output that has an amount of `0100000000000000` that could confuse
-        // a naive segwit parser. This can only be read with SegWit disabled
+        // Non segwit tx with zero input and one output that has an amount of `0100000000000000` that could confuse
+        // a naive segwit parser. This can only be read with segwit disabled
         MessageSerializer serializer = UNITTEST.getDefaultSerializer();
         String txHex = "0100000000010100000000000000016af1f2f3f4";
         int protoVersionNoWitness = serializer.getProtocolVersion() | Transaction.SERIALIZE_TRANSACTION_NO_WITNESS;

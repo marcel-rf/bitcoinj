@@ -51,7 +51,6 @@ public class MultiplexingDiscovery implements PeerDiscovery {
 
     /**
      * Builds a suitable set of peer discoveries. Will query them in parallel before producing a merged response.
-     * If specific services are required, DNS is not used as the protocol can't handle it.
      * @param params Network to use.
      * @param services Required services as a bitmask, e.g. {@link VersionMessage#NODE_NETWORK}.
      */
@@ -61,7 +60,6 @@ public class MultiplexingDiscovery implements PeerDiscovery {
 
     /**
      * Builds a suitable set of peer discoveries.
-     * If specific services are required, DNS is not used as the protocol can't handle it.
      * @param params Network to use.
      * @param services Required services as a bitmask, e.g. {@link VersionMessage#NODE_NETWORK}.
      * @param parallelQueries When true, seeds are queried in parallel
@@ -106,22 +104,14 @@ public class MultiplexingDiscovery implements PeerDiscovery {
             List<Callable<List<InetSocketAddress>>> tasks = new ArrayList<>();
             if (parallelQueries) {
                 for (final PeerDiscovery seed : seeds) {
-                    tasks.add(new Callable<List<InetSocketAddress>>() {
-                        @Override
-                        public List<InetSocketAddress> call() throws Exception {
-                            return seed.getPeers(services, timeoutValue, timeoutUnit);
-                        }
-                    });
+                    tasks.add(() -> seed.getPeers(services, timeoutValue, timeoutUnit));
                 }
             } else {
-                tasks.add(new Callable<List<InetSocketAddress>>() {
-                    @Override
-                    public List<InetSocketAddress> call() throws Exception {
-                        List<InetSocketAddress> peers = new LinkedList<>();
-                        for (final PeerDiscovery seed : seeds)
-                            peers.addAll(seed.getPeers(services, timeoutValue, timeoutUnit));
-                        return peers;
-                    }
+                tasks.add(() -> {
+                    List<InetSocketAddress> peers = new LinkedList<>();
+                    for (final PeerDiscovery seed : seeds)
+                        peers.addAll(seed.getPeers(services, timeoutValue, timeoutUnit));
+                    return peers;
                 });
             }
             final List<Future<List<InetSocketAddress>>> futures = vThreadPool.invokeAll(tasks, timeoutValue, timeoutUnit);

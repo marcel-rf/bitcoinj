@@ -34,17 +34,20 @@ import org.bitcoinj.wallet.WalletTransaction.Pool;
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.google.common.math.IntMath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.bouncycastle.crypto.params.KeyParameter;
 
 import javax.annotation.Nullable;
 import java.io.*;
+import java.math.RoundingMode;
 import java.util.*;
 
 import static org.bitcoinj.core.NetworkParameters.ProtocolVersion.WITNESS_VERSION;
 import static org.bitcoinj.core.Utils.*;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import java.math.BigInteger;
 
@@ -69,30 +72,24 @@ public class Transaction extends ChildMessage {
      * A comparator that can be used to sort transactions by their updateTime field. The ordering goes from most recent
      * into the past.
      */
-    public static final Comparator<Transaction> SORT_TX_BY_UPDATE_TIME = new Comparator<Transaction>() {
-        @Override
-        public int compare(final Transaction tx1, final Transaction tx2) {
-            final long time1 = tx1.getUpdateTime().getTime();
-            final long time2 = tx2.getUpdateTime().getTime();
-            final int updateTimeComparison = -(Long.compare(time1, time2));
-            //If time1==time2, compare by tx hash to make comparator consistent with equals
-            return updateTimeComparison != 0 ? updateTimeComparison : tx1.getTxId().compareTo(tx2.getTxId());
-        }
+    public static final Comparator<Transaction> SORT_TX_BY_UPDATE_TIME = (tx1, tx2) -> {
+        final long time1 = tx1.getUpdateTime().getTime();
+        final long time2 = tx2.getUpdateTime().getTime();
+        final int updateTimeComparison = -(Long.compare(time1, time2));
+        //If time1==time2, compare by tx hash to make comparator consistent with equals
+        return updateTimeComparison != 0 ? updateTimeComparison : tx1.getTxId().compareTo(tx2.getTxId());
     };
     /** A comparator that can be used to sort transactions by their chain height. */
-    public static final Comparator<Transaction> SORT_TX_BY_HEIGHT = new Comparator<Transaction>() {
-        @Override
-        public int compare(final Transaction tx1, final Transaction tx2) {
-            final TransactionConfidence confidence1 = tx1.getConfidence();
-            final int height1 = confidence1.getConfidenceType() == ConfidenceType.BUILDING
-                    ? confidence1.getAppearedAtChainHeight() : Block.BLOCK_HEIGHT_UNKNOWN;
-            final TransactionConfidence confidence2 = tx2.getConfidence();
-            final int height2 = confidence2.getConfidenceType() == ConfidenceType.BUILDING
-                    ? confidence2.getAppearedAtChainHeight() : Block.BLOCK_HEIGHT_UNKNOWN;
-            final int heightComparison = -(Integer.compare(height1, height2));
-            //If height1==height2, compare by tx hash to make comparator consistent with equals
-            return heightComparison != 0 ? heightComparison : tx1.getTxId().compareTo(tx2.getTxId());
-        }
+    public static final Comparator<Transaction> SORT_TX_BY_HEIGHT = (tx1, tx2) -> {
+        final TransactionConfidence confidence1 = tx1.getConfidence();
+        final int height1 = confidence1.getConfidenceType() == ConfidenceType.BUILDING
+                ? confidence1.getAppearedAtChainHeight() : Block.BLOCK_HEIGHT_UNKNOWN;
+        final TransactionConfidence confidence2 = tx2.getConfidence();
+        final int height2 = confidence2.getConfidenceType() == ConfidenceType.BUILDING
+                ? confidence2.getAppearedAtChainHeight() : Block.BLOCK_HEIGHT_UNKNOWN;
+        final int heightComparison = -(Integer.compare(height1, height2));
+        //If height1==height2, compare by tx hash to make comparator consistent with equals
+        return heightComparison != 0 ? heightComparison : tx1.getTxId().compareTo(tx2.getTxId());
     };
     private static final Logger log = LoggerFactory.getLogger(Transaction.class);
 
@@ -340,7 +337,7 @@ public class Transaction extends ChildMessage {
     public int getVsize() {
         if (!hasWitnesses())
             return getMessageSize();
-        return (getWeight() + 3) / 4; // round up
+        return IntMath.divide(getWeight(), 4, RoundingMode.CEILING); // round up
     }
 
     /**
@@ -568,7 +565,7 @@ public class Transaction extends ChildMessage {
         /**
          * @param value
          */
-        private SigHash(final int value) {
+        SigHash(final int value) {
             this.value = value;
         }
 
@@ -988,13 +985,23 @@ public class Transaction extends ChildMessage {
      * to understand the values of sigHash and anyoneCanPay: otherwise you can use the other form of this method
      * that sets them to typical defaults.
      *
-     * @throws ScriptException if the scriptPubKey is not a pay to address or P2PK script.
+     * @param prevOut A reference to the output being spent
+     * @param scriptPubKey The scriptPubKey of the output
+     * @param amount The amount of the output (which is part of the signature hash for segwit)
+     * @param sigKey The signing key
+     * @param sigHash enum specifying how the transaction hash is calculated
+     * @param anyoneCanPay anyone-can-pay hashing
+     * @return The newly created input
+     * @throws ScriptException if the scriptPubKey is something we don't know how to sign.
      */
-    public TransactionInput addSignedInput(TransactionOutPoint prevOut, Script scriptPubKey, ECKey sigKey,
+    public TransactionInput addSignedInput(TransactionOutPoint prevOut, Script scriptPubKey, Coin amount, ECKey sigKey,
                                            SigHash sigHash, boolean anyoneCanPay) throws ScriptException {
         // Verify the API user didn't try to do operations out of order.
         checkState(!outputs.isEmpty(), "Attempting to sign tx without outputs.");
-        TransactionInput input = new TransactionInput(params, this, new byte[] {}, prevOut);
+        if (amount == null || amount.value <= 0) {
+            log.warn("Illegal amount value. Amount is required for SegWit transactions.");
+        }
+        TransactionInput input = new TransactionInput(params, this, new byte[] {}, prevOut, amount);
         addInput(input);
         int inputIndex = inputs.size() - 1;
         if (ScriptPattern.isP2PK(scriptPubKey)) {
@@ -1020,27 +1027,74 @@ public class Transaction extends ChildMessage {
     }
 
     /**
-     * Same as {@link #addSignedInput(TransactionOutPoint, Script, ECKey, Transaction.SigHash, boolean)}
-     * but defaults to {@link SigHash#ALL} and "false" for the anyoneCanPay flag. This is normally what you want.
+     * @param prevOut A reference to the output being spent
+     * @param scriptPubKey The scriptPubKey of the output
+     * @param sigKey The signing key
+     * @param sigHash enum specifying how the transaction hash is calculated
+     * @param anyoneCanPay anyone-can-pay hashing
+     * @return The newly created input
+     * @throws ScriptException if the scriptPubKey is something we don't know how to sign.
+     * @deprecated Use {@link Transaction#addSignedInput(TransactionOutPoint, Script, Coin, ECKey, SigHash, boolean)}
      */
+    @Deprecated
+    public TransactionInput addSignedInput(TransactionOutPoint prevOut, Script scriptPubKey, ECKey sigKey,
+                                           SigHash sigHash, boolean anyoneCanPay) throws ScriptException {
+        return addSignedInput(prevOut, scriptPubKey, null, sigKey, sigHash, anyoneCanPay);
+    }
+
+    /**
+     * Adds a new and fully signed input for the given parameters. Note that this method is <b>not</b> thread safe
+     * and requires external synchronization.
+     * Defaults to {@link SigHash#ALL} and "false" for the anyoneCanPay flag. This is normally what you want.
+     * @param prevOut A reference to the output being spent
+     * @param scriptPubKey The scriptPubKey of the output
+     * @param amount The amount of the output (which is part of the signature hash for segwit)
+     * @param sigKey The signing key
+     * @return The newly created input
+     * @throws ScriptException if the scriptPubKey is something we don't know how to sign.
+     */
+    public TransactionInput addSignedInput(TransactionOutPoint prevOut, Script scriptPubKey, Coin amount, ECKey sigKey) throws ScriptException {
+        return addSignedInput(prevOut, scriptPubKey, amount, sigKey, SigHash.ALL, false);
+    }
+
+    /**
+     * @param prevOut A reference to the output being spent
+     * @param scriptPubKey The scriptPubKey of the output
+     * @param sigKey The signing key
+     * @return The newly created input
+     * @throws ScriptException if the scriptPubKey is something we don't know how to sign.
+     * @deprecated Use {@link Transaction#addSignedInput(TransactionOutPoint, Script, Coin, ECKey)}
+     */
+    @Deprecated
     public TransactionInput addSignedInput(TransactionOutPoint prevOut, Script scriptPubKey, ECKey sigKey) throws ScriptException {
-        return addSignedInput(prevOut, scriptPubKey, sigKey, SigHash.ALL, false);
+        return addSignedInput(prevOut, scriptPubKey, null, sigKey);
+    }
+
+    /**
+     * Adds an input that points to the given output and contains a valid signature for it, calculated using the
+     * signing key. Defaults to {@link SigHash#ALL} and "false" for the anyoneCanPay flag. This is normally what you want.
+     * @param output output to sign and use as input
+     * @param sigKey The signing key
+     * @return The newly created input
+     */
+    public TransactionInput addSignedInput(TransactionOutput output, ECKey sigKey) {
+        return addSignedInput(output, sigKey, SigHash.ALL, false);
     }
 
     /**
      * Adds an input that points to the given output and contains a valid signature for it, calculated using the
      * signing key.
+     * @see Transaction#addSignedInput(TransactionOutPoint, Script, Coin, ECKey, SigHash, boolean)
+     * @param output output to sign and use as input
+     * @param sigKey The signing key
+     * @param sigHash enum specifying how the transaction hash is calculated
+     * @param anyoneCanPay anyone-can-pay hashing
+     * @return The newly created input
      */
-    public TransactionInput addSignedInput(TransactionOutput output, ECKey signingKey) {
-        return addSignedInput(output.getOutPointFor(), output.getScriptPubKey(), signingKey);
-    }
-
-    /**
-     * Adds an input that points to the given output and contains a valid signature for it, calculated using the
-     * signing key.
-     */
-    public TransactionInput addSignedInput(TransactionOutput output, ECKey signingKey, SigHash sigHash, boolean anyoneCanPay) {
-        return addSignedInput(output.getOutPointFor(), output.getScriptPubKey(), signingKey, sigHash, anyoneCanPay);
+    public TransactionInput addSignedInput(TransactionOutput output, ECKey sigKey, SigHash sigHash, boolean anyoneCanPay) {
+        checkNotNull(output.getValue(), "TransactionOutput.getValue() must not be null");
+        checkState(output.getValue().value > 0, "TransactionOutput.getValue() must not be greater than zero");
+        return addSignedInput(output.getOutPointFor(), output.getScriptPubKey(), output.getValue(), sigKey, sigHash, anyoneCanPay);
     }
 
     /**

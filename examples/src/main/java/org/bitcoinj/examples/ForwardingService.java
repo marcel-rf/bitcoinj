@@ -104,19 +104,16 @@ public class ForwardingService {
             // to be double spent, no harm done. Wallet.allowSpendingUnconfirmedTransactions() would have to
             // be called in onSetupCompleted() above. But we don't do that here to demonstrate the more common
             // case of waiting for a block.
-            Futures.addCallback(tx.getConfidence().getDepthFuture(1), new FutureCallback<TransactionConfidence>() {
-                @Override
-                public void onSuccess(TransactionConfidence result) {
+
+            tx.getConfidence().getDepthFuture(1).whenComplete((result, t) -> {
+                if (result != null) {
                     System.out.println("Confirmation received.");
                     forwardCoins();
-                }
-
-                @Override
-                public void onFailure(Throwable t) {
+                } else {
                     // This kind of future can't fail, just rethrow in case something weird happens.
                     throw new RuntimeException(t);
                 }
-            }, MoreExecutors.directExecutor());
+            });
         });
 
         Address sendToAddress = LegacyAddress.fromKey(params, kit.wallet().currentReceiveKey());
@@ -136,12 +133,10 @@ public class ForwardingService {
             checkNotNull(sendResult);  // We should never try to send more coins than we have!
             System.out.println("Sending ...");
             // Register a callback that is invoked when the transaction has propagated across the network.
-            // This shows a second style of registering ListenableFuture callbacks, it works when you don't
-            // need access to the object the future returns.
-            sendResult.broadcastComplete.addListener(() -> {
+            sendResult.broadcastComplete.thenAccept(transaction -> {
                 // The wallet has changed now, it'll get auto saved shortly or when the app shuts down.
-                System.out.println("Sent coins onwards! Transaction hash is " + sendResult.tx.getTxId());
-            }, MoreExecutors.directExecutor());
+                System.out.println("Sent coins onwards! Transaction hash is " + transaction.getTxId());
+            });
         } catch (KeyCrypterException | InsufficientMoneyException e) {
             // We don't use encrypted wallets in this example - can never happen.
             throw new RuntimeException(e);

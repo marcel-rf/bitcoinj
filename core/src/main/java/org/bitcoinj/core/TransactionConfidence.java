@@ -18,7 +18,6 @@
 package org.bitcoinj.core;
 
 import com.google.common.collect.*;
-import com.google.common.util.concurrent.*;
 
 import org.bitcoinj.utils.*;
 import org.bitcoinj.wallet.CoinSelector;
@@ -120,7 +119,8 @@ public class TransactionConfidence {
          */
         UNKNOWN(0);
         
-        private int value;
+        private final int value;
+
         ConfidenceType(int value) {
             this.value = value;
         }
@@ -458,12 +458,7 @@ public class TransactionConfidence {
      */
     public void queueListeners(final Listener.ChangeReason reason) {
         for (final ListenerRegistration<Listener> registration : listeners) {
-            registration.executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    registration.listener.onConfidenceChanged(TransactionConfidence.this, reason);
-                }
-            });
+            registration.executor.execute(() -> registration.listener.onConfidenceChanged(TransactionConfidence.this, reason));
         }
     }
 
@@ -492,23 +487,23 @@ public class TransactionConfidence {
      * depth to one will wait until it appears in a block on the best chain, and zero will wait until it has been seen
      * on the network.
      */
-    public synchronized ListenableFuture<TransactionConfidence> getDepthFuture(final int depth, Executor executor) {
-        final SettableFuture<TransactionConfidence> result = SettableFuture.create();
+    public synchronized ListenableCompletableFuture<TransactionConfidence> getDepthFuture(final int depth, Executor executor) {
+        final ListenableCompletableFuture<TransactionConfidence> result = new ListenableCompletableFuture<>();
         if (getDepthInBlocks() >= depth) {
-            result.set(this);
+            result.complete(this);
         }
         addEventListener(executor, new Listener() {
             @Override public void onConfidenceChanged(TransactionConfidence confidence, ChangeReason reason) {
                 if (getDepthInBlocks() >= depth) {
                     removeEventListener(this);
-                    result.set(confidence);
+                    result.complete(confidence);
                 }
             }
         });
         return result;
     }
 
-    public synchronized ListenableFuture<TransactionConfidence> getDepthFuture(final int depth) {
+    public synchronized ListenableCompletableFuture<TransactionConfidence> getDepthFuture(final int depth) {
         return getDepthFuture(depth, Threading.USER_THREAD);
     }
 

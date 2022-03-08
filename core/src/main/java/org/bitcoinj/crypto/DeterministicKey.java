@@ -44,13 +44,10 @@ import static com.google.common.base.Preconditions.*;
 public class DeterministicKey extends ECKey {
 
     /** Sorts deterministic keys in the order of their child number. That's <i>usually</i> the order used to derive them. */
-    public static final Comparator<ECKey> CHILDNUM_ORDER = new Comparator<ECKey>() {
-        @Override
-        public int compare(ECKey k1, ECKey k2) {
-            ChildNumber cn1 = ((DeterministicKey) k1).getChildNumber();
-            ChildNumber cn2 = ((DeterministicKey) k2).getChildNumber();
-            return cn1.compareTo(cn2);
-        }
+    public static final Comparator<ECKey> CHILDNUM_ORDER = (k1, k2) -> {
+        ChildNumber cn1 = ((DeterministicKey) k1).getChildNumber();
+        ChildNumber cn2 = ((DeterministicKey) k2).getChildNumber();
+        return cn1.compareTo(cn2);
     };
 
     private final DeterministicKey parent;
@@ -397,7 +394,7 @@ public class DeterministicKey extends ECKey {
             if (decryptedKey.length != 32)
                 throw new KeyCrypterException.InvalidCipherText(
                         "Decrypted key must be 32 bytes long, but is " + decryptedKey.length);
-            return new BigInteger(1, decryptedKey);
+            return Utils.bytesToBigInteger(decryptedKey);
         }
         // Otherwise we don't have it, but maybe we can figure it out from our parents. Walk up the tree looking for
         // the first key that has some encrypted private key data.
@@ -434,7 +431,7 @@ public class DeterministicKey extends ECKey {
 
     private BigInteger derivePrivateKeyDownwards(DeterministicKey cursor, byte[] parentalPrivateKeyBytes) {
         DeterministicKey downCursor = new DeterministicKey(cursor.childNumberPath, cursor.chainCode,
-                cursor.pub, new BigInteger(1, parentalPrivateKeyBytes), cursor.parent);
+                cursor.pub, Utils.bytesToBigInteger(parentalPrivateKeyBytes), cursor.parent);
         // Now we have to rederive the keys along the path back to ourselves. That path can be found by just truncating
         // our path with the length of the parents path.
         List<ChildNumber> path = childNumberPath.subList(cursor.getPath().size(), childNumberPath.size());
@@ -579,7 +576,7 @@ public class DeterministicKey extends ECKey {
         if (pub) {
             return new DeterministicKey(path, chainCode, new LazyECPoint(ECKey.CURVE.getCurve(), data), parent, depth, parentFingerprint);
         } else {
-            return new DeterministicKey(path, chainCode, new BigInteger(1, data), parent, depth, parentFingerprint);
+            return new DeterministicKey(path, chainCode, Utils.bytesToBigInteger(data), parent, depth, parentFingerprint);
         }
     }
 

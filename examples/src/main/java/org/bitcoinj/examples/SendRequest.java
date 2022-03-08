@@ -16,11 +16,6 @@
 
 package org.bitcoinj.examples;
 
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.MoreExecutors;
-
 import org.bitcoinj.core.*;
 import org.bitcoinj.kits.WalletAppKit;
 import org.bitcoinj.params.TestNet3Params;
@@ -28,6 +23,7 @@ import org.bitcoinj.wallet.Wallet;
 import org.bitcoinj.wallet.Wallet.BalanceType;
 
 import java.io.File;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * The following example shows you how to create a SendRequest to send coins from a wallet to a given address.
@@ -57,7 +53,7 @@ public class SendRequest {
         // Have a look at the code of the SendRequest class to see what's happening and what other options you have: https://bitcoinj.github.io/javadoc/0.11/com/google/bitcoin/core/Wallet.SendRequest.html
         // 
         // Please note that this might raise a InsufficientMoneyException if your wallet has not enough coins to spend.
-        // When using the testnet you can use a faucet (like the http://faucet.xeno-genesis.com/) to get testnet coins.
+        // When using the testnet you can use a faucet to get testnet coins.
         // In this example we catch the InsufficientMoneyException and register a BalanceFuture callback that runs once the wallet has enough balance.
         try {
             Wallet.SendResult result = kit.wallet().sendCoins(kit.peerGroup(), to, value);
@@ -68,21 +64,15 @@ public class SendRequest {
             System.out.println("Send money to: " + kit.wallet().currentReceiveAddress().toString());
 
             // Bitcoinj allows you to define a BalanceFuture to execute a callback once your wallet has a certain balance.
-            // Here we wait until the we have enough balance and display a notice.
-            // Bitcoinj is using the ListenableFutures of the Guava library. Have a look here for more information: https://github.com/google/guava/wiki/ListenableFutureExplained
-            ListenableFuture<Coin> balanceFuture = kit.wallet().getBalanceFuture(value, BalanceType.AVAILABLE);
-            FutureCallback<Coin> callback = new FutureCallback<Coin>() {
-                @Override
-                public void onSuccess(Coin balance) {
+            // Here we wait until we have enough balance and display a notice.
+            CompletableFuture<Coin> balanceFuture = kit.wallet().getBalanceFuture(value, BalanceType.AVAILABLE);
+            balanceFuture.whenComplete((balance, throwable) -> {
+                if (balance != null) {
                     System.out.println("coins arrived and the wallet now has enough balance");
-                }
-
-                @Override
-                public void onFailure(Throwable t) {
+                } else {
                     System.out.println("something went wrong");
                 }
-            };
-            Futures.addCallback(balanceFuture, callback, MoreExecutors.directExecutor());
+            });
         }
 
         // shutting down 

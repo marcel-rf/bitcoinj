@@ -59,11 +59,12 @@ public class Script {
         P2PK(2), // pay to pubkey
         P2SH(3), // pay to script hash
         P2WPKH(4), // pay to witness pubkey hash
-        P2WSH(5); // pay to witness script hash
+        P2WSH(5), // pay to witness script hash
+        P2TR(6); // pay to taproot
 
         public final int id;
 
-        private ScriptType(int id) {
+        ScriptType(int id) {
             this.id = id;
         }
     }
@@ -283,6 +284,8 @@ public class Script {
             return LegacyAddress.fromKey(params, ECKey.fromPublicOnly(ScriptPattern.extractKeyFromP2PK(this)));
         else if (ScriptPattern.isP2WH(this))
             return SegwitAddress.fromHash(params, ScriptPattern.extractHashFromP2WH(this));
+        else if (ScriptPattern.isP2TR(this))
+            return SegwitAddress.fromProgram(params, 1, ScriptPattern.extractOutputKeyFromP2TR(this));
         else
             throw new ScriptException(ScriptError.SCRIPT_ERR_UNKNOWN_ERROR, "Cannot cast this script to an address");
     }
@@ -603,7 +606,12 @@ public class Script {
             // scriptSig is empty
             // witness: <sig> <pubKey>
             int compressedPubKeySize = 33;
-            return SIG_SIZE + (pubKey != null ? pubKey.getPubKey().length : compressedPubKeySize);
+            int publicKeyLength = pubKey != null ? pubKey.getPubKey().length : compressedPubKeySize;
+            return VarInt.sizeOf(2) // number of witness pushes
+                    + VarInt.sizeOf(SIG_SIZE) // size of signature push
+                    + SIG_SIZE // signature push
+                    + VarInt.sizeOf(publicKeyLength) // size of pubKey push
+                    + publicKeyLength; // pubKey push
         } else {
             throw new IllegalStateException("Unsupported script type");
         }
@@ -793,7 +801,8 @@ public class Script {
                     opcode == OP_INVERT || opcode == OP_AND || opcode == OP_OR || opcode == OP_XOR ||
                     opcode == OP_2MUL || opcode == OP_2DIV || opcode == OP_MUL || opcode == OP_DIV ||
                     opcode == OP_MOD || opcode == OP_LSHIFT || opcode == OP_RSHIFT)
-                throw new ScriptException(ScriptError.SCRIPT_ERR_DISABLED_OPCODE, "Script included a disabled Script Op.");
+                throw new ScriptException(ScriptError.SCRIPT_ERR_DISABLED_OPCODE,
+                        "Script included disabled Script Op " + ScriptOpCodes.getOpCodeName(opcode));
 
             if (shouldExecute && OP_0 <= opcode && opcode <= OP_PUSHDATA4) {
                 // Check minimal push
@@ -1524,14 +1533,14 @@ public class Script {
      *                         Accessing txContainingThis from another thread while this method runs results in undefined behavior.
      * @param scriptSigIndex The index in txContainingThis of the scriptSig (note: NOT the index of the scriptPubKey).
      * @param scriptPubKey The connected scriptPubKey containing the conditions needed to claim the value.
-     * @param witness Transaction witness belonging to the transaction input containing this script. Needed for SegWit.
-     * @param value Value of the output. Needed for SegWit scripts.
+     * @param witness Transaction witness belonging to the transaction input containing this script. Needed for segwit.
+     * @param value Value of the output. Needed for segwit scripts.
      * @param verifyFlags Each flag enables one validation rule.
      */
     public void correctlySpends(Transaction txContainingThis, int scriptSigIndex, @Nullable TransactionWitness witness, @Nullable Coin value,
             Script scriptPubKey, Set<VerifyFlag> verifyFlags) throws ScriptException {
         if (ScriptPattern.isP2WPKH(scriptPubKey)) {
-            // For SegWit, full validation isn't implemented. So we simply check the signature. P2SH_P2WPKH is handled
+            // For segwit, full validation isn't implemented. So we simply check the signature. P2SH_P2WPKH is handled
             // by the P2SH code for now.
             if (witness.getPushCount() < 2)
                 throw new ScriptException(ScriptError.SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY, witness.toString());
@@ -1676,6 +1685,8 @@ public class Script {
             return ScriptType.P2WPKH;
         if (ScriptPattern.isP2WSH(this))
             return ScriptType.P2WSH;
+        if (ScriptPattern.isP2TR(this))
+            return ScriptType.P2TR;
         return null;
     }
 

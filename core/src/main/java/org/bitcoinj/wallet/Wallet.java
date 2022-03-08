@@ -19,7 +19,8 @@ package org.bitcoinj.wallet;
 
 import com.google.common.annotations.*;
 import com.google.common.collect.*;
-import com.google.common.util.concurrent.*;
+import com.google.common.math.IntMath;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.*;
 import net.jcip.annotations.*;
 import org.bitcoinj.core.listeners.*;
@@ -75,6 +76,7 @@ import org.bouncycastle.crypto.params.*;
 import javax.annotation.*;
 import java.io.*;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.*;
@@ -476,25 +478,22 @@ public class Wallet extends BaseTaggableObject
 
     private void createTransientState() {
         ignoreNextNewBlock = new HashSet<>();
-        txConfidenceListener = new TransactionConfidence.Listener() {
-            @Override
-            public void onConfidenceChanged(TransactionConfidence confidence, TransactionConfidence.Listener.ChangeReason reason) {
-                // This will run on the user code thread so we shouldn't do anything too complicated here.
-                // We only want to queue a wallet changed event and auto-save if the number of peers announcing
-                // the transaction has changed, as that confidence change is made by the networking code which
-                // doesn't necessarily know at that point which wallets contain which transactions, so it's up
-                // to us to listen for that. Other types of confidence changes (type, etc) are triggered by us,
-                // so we'll queue up a wallet change event in other parts of the code.
-                if (reason == ChangeReason.SEEN_PEERS) {
-                    lock.lock();
-                    try {
-                        checkBalanceFuturesLocked(null);
-                        Transaction tx = getTransaction(confidence.getTransactionHash());
-                        queueOnTransactionConfidenceChanged(tx);
-                        maybeQueueOnWalletChanged();
-                    } finally {
-                        lock.unlock();
-                    }
+        txConfidenceListener = (confidence, reason) -> {
+            // This will run on the user code thread so we shouldn't do anything too complicated here.
+            // We only want to queue a wallet changed event and auto-save if the number of peers announcing
+            // the transaction has changed, as that confidence change is made by the networking code which
+            // doesn't necessarily know at that point which wallets contain which transactions, so it's up
+            // to us to listen for that. Other types of confidence changes (type, etc) are triggered by us,
+            // so we'll queue up a wallet change event in other parts of the code.
+            if (reason == Listener.ChangeReason.SEEN_PEERS) {
+                lock.lock();
+                try {
+                    checkBalanceFuturesLocked(null);
+                    Transaction tx = getTransaction(confidence.getTransactionHash());
+                    queueOnTransactionConfidenceChanged(tx);
+                    maybeQueueOnWalletChanged();
+                } finally {
+                    lock.unlock();
                 }
             }
         };
@@ -1162,7 +1161,7 @@ public class Wallet extends BaseTaggableObject
             return isPubKeyHashMine(address.getHash(), scriptType);
         else if (scriptType == ScriptType.P2SH)
             return isPayToScriptHashMine(address.getHash());
-        else if (scriptType == ScriptType.P2WSH)
+        else if (scriptType == ScriptType.P2WSH || scriptType == ScriptType.P2TR)
             return false;
         else
             throw new IllegalArgumentException(address.toString());
@@ -2720,12 +2719,10 @@ public class Wallet extends BaseTaggableObject
     /**
      * Updates the wallet with the given transaction: puts it into the pending pool, sets the spent flags and runs
      * the onCoinsSent/onCoinsReceived event listener. Used in two situations:
-     * <p>
      * <ol>
      *     <li>When we have just successfully transmitted the tx we created to the network.</li>
      *     <li>When we receive a pending transaction that didn't appear in the chain yet, and we did not create it.</li>
      * </ol>
-     * <p>
      * Triggers an auto save (if enabled.)
      * <p>
      * Unlike {@link Wallet#maybeCommitTx} {@code commitTx} throws an exception if the transaction
@@ -2948,12 +2945,7 @@ public class Wallet extends BaseTaggableObject
             if (registration.executor == Threading.SAME_THREAD) {
                 registration.listener.onTransactionConfidenceChanged(this, tx);
             } else {
-                registration.executor.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        registration.listener.onTransactionConfidenceChanged(Wallet.this, tx);
-                    }
-                });
+                registration.executor.execute(() -> registration.listener.onTransactionConfidenceChanged(Wallet.this, tx));
             }
         }
     }
@@ -2965,36 +2957,21 @@ public class Wallet extends BaseTaggableObject
         checkState(onWalletChangedSuppressions >= 0);
         if (onWalletChangedSuppressions > 0) return;
         for (final ListenerRegistration<WalletChangeEventListener> registration : changeListeners) {
-            registration.executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    registration.listener.onWalletChanged(Wallet.this);
-                }
-            });
+            registration.executor.execute(() -> registration.listener.onWalletChanged(Wallet.this));
         }
     }
 
     protected void queueOnCoinsReceived(final Transaction tx, final Coin balance, final Coin newBalance) {
         checkState(lock.isHeldByCurrentThread());
         for (final ListenerRegistration<WalletCoinsReceivedEventListener> registration : coinsReceivedListeners) {
-            registration.executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    registration.listener.onCoinsReceived(Wallet.this, tx, balance, newBalance);
-                }
-            });
+            registration.executor.execute(() -> registration.listener.onCoinsReceived(Wallet.this, tx, balance, newBalance));
         }
     }
 
     protected void queueOnCoinsSent(final Transaction tx, final Coin prevBalance, final Coin newBalance) {
         checkState(lock.isHeldByCurrentThread());
         for (final ListenerRegistration<WalletCoinsSentEventListener> registration : coinsSentListeners) {
-            registration.executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    registration.listener.onCoinsSent(Wallet.this, tx, prevBalance, newBalance);
-                }
-            });
+            registration.executor.execute(() -> registration.listener.onCoinsSent(Wallet.this, tx, prevBalance, newBalance));
         }
     }
 
@@ -3002,23 +2979,13 @@ public class Wallet extends BaseTaggableObject
         checkState(lock.isHeldByCurrentThread());
         checkState(insideReorg);
         for (final ListenerRegistration<WalletReorganizeEventListener> registration : reorganizeListeners) {
-            registration.executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    registration.listener.onReorganize(Wallet.this);
-                }
-            });
+            registration.executor.execute(() -> registration.listener.onReorganize(Wallet.this));
         }
     }
 
     protected void queueOnScriptsChanged(final List<Script> scripts, final boolean isAddingScripts) {
         for (final ListenerRegistration<ScriptsChangeEventListener> registration : scriptsChangeListeners) {
-            registration.executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    registration.listener.onScriptsChanged(Wallet.this, scripts, isAddingScripts);
-                }
-            });
+            registration.executor.execute(() -> registration.listener.onScriptsChanged(Wallet.this, scripts, isAddingScripts));
         }
     }
 
@@ -3764,11 +3731,17 @@ public class Wallet extends BaseTaggableObject
     }
 
     private static class BalanceFutureRequest {
-        public SettableFuture<Coin> future;
-        public Coin value;
-        public BalanceType type;
+        public final ListenableCompletableFuture<Coin> future;
+        public final Coin value;
+        public final BalanceType type;
+
+        private BalanceFutureRequest(ListenableCompletableFuture<Coin> future, Coin value, BalanceType type) {
+            this.future = future;
+            this.value = value;
+            this.type = type;
+        }
     }
-    @GuardedBy("lock") private List<BalanceFutureRequest> balanceFutureRequests = new LinkedList<>();
+    @GuardedBy("lock") private final List<BalanceFutureRequest> balanceFutureRequests = new LinkedList<>();
 
     /**
      * <p>Returns a future that will complete when the balance of the given type has becom equal or larger to the given
@@ -3784,23 +3757,19 @@ public class Wallet extends BaseTaggableObject
      * you can use {@link Threading#waitForUserCode()} to block until the future had a
      * chance to be updated.</p>
      */
-    public ListenableFuture<Coin> getBalanceFuture(final Coin value, final BalanceType type) {
+    public ListenableCompletableFuture<Coin> getBalanceFuture(final Coin value, final BalanceType type) {
         lock.lock();
         try {
-            final SettableFuture<Coin> future = SettableFuture.create();
+            final ListenableCompletableFuture<Coin> future = new ListenableCompletableFuture<>();
             final Coin current = getBalance(type);
             if (current.compareTo(value) >= 0) {
                 // Already have enough.
-                future.set(current);
+                future.complete(current);
             } else {
                 // Will be checked later in checkBalanceFutures. We don't just add an event listener for ourselves
                 // here so that running getBalanceFuture().get() in the user code thread works - generally we must
                 // avoid giving the user back futures that require the user code thread to be free.
-                BalanceFutureRequest req = new BalanceFutureRequest();
-                req.future = future;
-                req.value = value;
-                req.type = type;
-                balanceFutureRequests.add(req);
+                balanceFutureRequests.add(new BalanceFutureRequest(future, value, type));
             }
             return future;
         } finally {
@@ -3812,21 +3781,15 @@ public class Wallet extends BaseTaggableObject
     @SuppressWarnings("FieldAccessNotGuarded")
     private void checkBalanceFuturesLocked(@Nullable Coin avail) {
         checkState(lock.isHeldByCurrentThread());
-        final ListIterator<BalanceFutureRequest> it = balanceFutureRequests.listIterator();
-        while (it.hasNext()) {
-            final BalanceFutureRequest req = it.next();
-            Coin val = getBalance(req.type);   // This could be slow for lots of futures.
-            if (val.compareTo(req.value) < 0) continue;
-            // Found one that's finished.
-            it.remove();
-            final Coin v = val;
-            // Don't run any user-provided future listeners with our lock held.
-            Threading.USER_THREAD.execute(new Runnable() {
-                @Override public void run() {
-                    req.future.set(v);
-                }
-            });
-        }
+        balanceFutureRequests.forEach(req -> {
+            Coin current = getBalance(req.type);   // This could be slow for lots of futures.
+            if (current.compareTo(req.value) >= 0) {
+                // Found one that's finished.
+                // Don't run any user-provided future listeners with our lock held.
+                Threading.USER_THREAD.execute(() -> req.future.complete(current));
+            }
+        });
+        balanceFutureRequests.removeIf(req -> req.future.isDone());
     }
 
     /**
@@ -3916,7 +3879,7 @@ public class Wallet extends BaseTaggableObject
         /** The Bitcoin transaction message that moves the money. */
         public final Transaction tx;
         /** A future that will complete once the tx message has been successfully broadcast to the network. This is just the result of calling broadcast.future() */
-        public final ListenableFuture<Transaction> broadcastComplete;
+        public final ListenableCompletableFuture<Transaction> broadcastComplete;
         /** The broadcast object returned by the linked TransactionBroadcaster */
         public final TransactionBroadcast broadcast;
 
@@ -5201,7 +5164,8 @@ public class Wallet extends BaseTaggableObject
                 } else if (ScriptPattern.isP2WPKH(script)) {
                     key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2WH(script), Script.ScriptType.P2WPKH);
                     checkNotNull(key, "Coin selection includes unspendable outputs");
-                    vsize += (script.getNumberOfBytesRequiredToSpend(key, redeemScript) + 3) / 4; // round up
+                    vsize += IntMath.divide(script.getNumberOfBytesRequiredToSpend(key, redeemScript), 4,
+                            RoundingMode.CEILING); // round up
                 } else if (ScriptPattern.isP2SH(script)) {
                     redeemScript = findRedeemDataFromScriptHash(ScriptPattern.extractHashFromP2SH(script)).redeemScript;
                     checkNotNull(redeemScript, "Coin selection includes unspendable outputs");
@@ -5352,7 +5316,7 @@ public class Wallet extends BaseTaggableObject
      * @return A list of transactions that the wallet just made/will make for internal maintenance. Might be empty.
      * @throws org.bitcoinj.wallet.DeterministicUpgradeRequiresPassword if key rotation requires the users password.
      */
-    public ListenableFuture<List<Transaction>> doMaintenance(@Nullable KeyParameter aesKey, boolean signAndSend)
+    public ListenableCompletableFuture<List<Transaction>> doMaintenance(@Nullable KeyParameter aesKey, boolean signAndSend)
             throws DeterministicUpgradeRequiresPassword {
         return doMaintenance(KeyChainGroupStructure.DEFAULT, aesKey, signAndSend);
     }
@@ -5372,7 +5336,7 @@ public class Wallet extends BaseTaggableObject
      * @return A list of transactions that the wallet just made/will make for internal maintenance. Might be empty.
      * @throws org.bitcoinj.wallet.DeterministicUpgradeRequiresPassword if key rotation requires the users password.
      */
-    public ListenableFuture<List<Transaction>> doMaintenance(KeyChainGroupStructure structure,
+    public ListenableCompletableFuture<List<Transaction>> doMaintenance(KeyChainGroupStructure structure,
             @Nullable KeyParameter aesKey, boolean signAndSend) throws DeterministicUpgradeRequiresPassword {
         List<Transaction> txns;
         lock.lock();
@@ -5380,34 +5344,30 @@ public class Wallet extends BaseTaggableObject
         try {
             txns = maybeRotateKeys(structure, aesKey, signAndSend);
             if (!signAndSend)
-                return Futures.immediateFuture(txns);
+                return ListenableCompletableFuture.completedFuture(txns);
         } finally {
             keyChainGroupLock.unlock();
             lock.unlock();
         }
         checkState(!lock.isHeldByCurrentThread());
-        ArrayList<ListenableFuture<Transaction>> futures = new ArrayList<>(txns.size());
+        ArrayList<CompletableFuture<Transaction>> futures = new ArrayList<>(txns.size());
         TransactionBroadcaster broadcaster = vTransactionBroadcaster;
         for (Transaction tx : txns) {
             try {
-                final ListenableFuture<Transaction> future = broadcaster.broadcastTransaction(tx).future();
+                final CompletableFuture<Transaction> future = broadcaster.broadcastTransaction(tx).future();
                 futures.add(future);
-                Futures.addCallback(future, new FutureCallback<Transaction>() {
-                    @Override
-                    public void onSuccess(Transaction transaction) {
+                future.whenComplete((transaction, throwable) -> {
+                    if (transaction != null) {
                         log.info("Successfully broadcast key rotation tx: {}", transaction);
-                    }
-
-                    @Override
-                    public void onFailure(Throwable throwable) {
+                    } else {
                         log.error("Failed to broadcast key rotation tx", throwable);
                     }
-                }, MoreExecutors.directExecutor());
+                });
             } catch (Exception e) {
                 log.error("Failed to broadcast rekey tx", e);
             }
         }
-        return Futures.allAsList(futures);
+        return FutureUtils.allAsList(futures);
     }
 
     // Checks to see if any coins are controlled by rotating keys and if so, spends them.

@@ -18,7 +18,8 @@ package org.bitcoinj.core;
 
 import com.google.common.annotations.*;
 import com.google.common.base.*;
-import com.google.common.util.concurrent.*;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.bitcoinj.utils.*;
 import org.bitcoinj.wallet.Wallet;
 import org.slf4j.*;
@@ -40,7 +41,7 @@ import org.bitcoinj.core.listeners.PreMessageReceivedEventListener;
 public class TransactionBroadcast {
     private static final Logger log = LoggerFactory.getLogger(TransactionBroadcast.class);
 
-    private final SettableFuture<Transaction> future = SettableFuture.create();
+    private final CompletableFuture<Transaction> future = new ListenableCompletableFuture<>();
     private final PeerGroup peerGroup;
     private final Transaction tx;
     private int minConnections;
@@ -67,22 +68,22 @@ public class TransactionBroadcast {
     }
 
     @VisibleForTesting
-    public static TransactionBroadcast createMockBroadcast(Transaction tx, final SettableFuture<Transaction> future) {
+    public static TransactionBroadcast createMockBroadcast(Transaction tx, final CompletableFuture<Transaction> future) {
         return new TransactionBroadcast(tx) {
             @Override
-            public ListenableFuture<Transaction> broadcast() {
-                return future;
+            public ListenableCompletableFuture<Transaction> broadcast() {
+                return ListenableCompletableFuture.of(future);
             }
 
             @Override
-            public ListenableFuture<Transaction> future() {
-                return future;
+            public ListenableCompletableFuture<Transaction> future() {
+                return ListenableCompletableFuture.of(future);
             }
         };
     }
 
-    public ListenableFuture<Transaction> future() {
-        return future;
+    public ListenableCompletableFuture<Transaction> future() {
+        return ListenableCompletableFuture.of(future);
     }
 
     public void setMinConnections(int minConnections) {
@@ -104,7 +105,7 @@ public class TransactionBroadcast {
                     long threshold = Math.round(numWaitingFor / 2.0);
                     if (size > threshold) {
                         log.warn("Threshold for considering broadcast rejected has been reached ({}/{})", size, threshold);
-                        future.setException(new RejectedTransactionException(tx, rejectMessage));
+                        future.completeExceptionally(new RejectedTransactionException(tx, rejectMessage));
                         peerGroup.removePreMessageReceivedEventListener(this);
                     }
                 }
@@ -113,11 +114,11 @@ public class TransactionBroadcast {
         }
     };
 
-    public ListenableFuture<Transaction> broadcast() {
+    public ListenableCompletableFuture<Transaction> broadcast() {
         peerGroup.addPreMessageReceivedEventListener(Threading.SAME_THREAD, rejectionListener);
         log.info("Waiting for {} peers required for broadcast, we have {} ...", minConnections, peerGroup.getConnectedPeers().size());
         peerGroup.waitForPeers(minConnections).addListener(new EnoughAvailablePeers(), Threading.SAME_THREAD);
-        return future;
+        return ListenableCompletableFuture.of(future);
     }
 
     private class EnoughAvailablePeers implements Runnable {
@@ -163,12 +164,9 @@ public class TransactionBroadcast {
                     if (dropPeersAfterBroadcast) {
                         // We drop the peer shortly after the transaction has been sent, because this peer will not
                         // send us back useful broadcast confirmations.
-                        future.addListener(new Runnable() {
-                            @Override
-                            public void run() {
-                                Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
-                                peer.close();
-                            }
+                        future.addListener(() -> {
+                            Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
+                            peer.close();
                         }, Threading.THREAD_POOL);
                     }
                     // We don't record the peer as having seen the tx in the memory pool because we want to track only
@@ -212,7 +210,7 @@ public class TransactionBroadcast {
                 log.info("broadcastTransaction: {} complete", tx.getTxId());
                 peerGroup.removePreMessageReceivedEventListener(rejectionListener);
                 conf.removeEventListener(this);
-                future.set(tx);  // RE-ENTRANCY POINT
+                future.complete(tx);  // RE-ENTRANCY POINT
             }
         }
     }
@@ -239,12 +237,7 @@ public class TransactionBroadcast {
                 if (executor == null)
                     callback.onBroadcastProgress(progress);
                 else
-                    executor.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            callback.onBroadcastProgress(progress);
-                        }
-                    });
+                    executor.execute(() -> callback.onBroadcastProgress(progress));
             } catch (Throwable e) {
                 log.error("Exception during progress callback", e);
             }

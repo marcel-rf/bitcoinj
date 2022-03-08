@@ -17,17 +17,13 @@
 
 package org.bitcoinj.tools;
 
-import org.bitcoinj.core.listeners.NewBestBlockListener;
 import org.bitcoinj.core.*;
 import org.bitcoinj.net.discovery.DnsDiscovery;
-import org.bitcoinj.params.MainNetParams;
-import org.bitcoinj.params.RegTestParams;
-import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.store.BlockStore;
 import org.bitcoinj.store.MemoryBlockStore;
 import org.bitcoinj.utils.BriefLogFormatter;
+import org.bitcoinj.utils.Network;
 import org.bitcoinj.utils.Threading;
-import com.google.common.io.Resources;
 import picocli.CommandLine;
 
 import java.io.DataOutputStream;
@@ -39,6 +35,7 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.DigestOutputStream;
@@ -57,7 +54,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 @CommandLine.Command(name = "build-checkpoints", usageHelpAutoWidth = true, sortOptions = false, description = "Create checkpoint files to use with CheckpointManager.")
 public class BuildCheckpoints implements Callable<Integer> {
     @CommandLine.Option(names = "--net", description = "Which network to connect to. Valid values: ${COMPLETION-CANDIDATES}. Default: ${DEFAULT-VALUE}")
-    private NetworkEnum net = NetworkEnum.MAIN;
+    private Network net = Network.MAIN;
     @CommandLine.Option(names = "--peer", description = "IP address/domain name for connection instead of localhost.")
     private String peer = null;
     @CommandLine.Option(names = "--days", description = "How many days to keep as a safety margin. Checkpointing will be done up to this many days ago.")
@@ -76,18 +73,21 @@ public class BuildCheckpoints implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
         final String suffix;
+        params = net.networkParameters();
+        Context.propagate(new Context(params));
+
         switch (net) {
             case MAIN:
             case PROD:
-                params = MainNetParams.get();
                 suffix = "";
                 break;
             case TEST:
-                params = TestNet3Params.get();
                 suffix = "-testnet";
                 break;
+            case SIGNET:
+                suffix = "-signet";
+                break;
             case REGTEST:
-                params = RegTestParams.get();
                 suffix = "-regtest";
                 break;
             default:
@@ -114,7 +114,7 @@ public class BuildCheckpoints implements Callable<Integer> {
                 return 1;
             }
         } else if (networkHasDnsSeeds) {
-            // for PROD and TEST use a peer group discovered with dns
+            // use a peer group discovered with dns
             peerGroup.setUserAgent("PeerMonitor", "1.0");
             peerGroup.setMaxConnections(20);
             peerGroup.addPeerDiscovery(new DnsDiscovery(params));
@@ -184,7 +184,7 @@ public class BuildCheckpoints implements Callable<Integer> {
             for (StoredBlock block : checkpoints.values()) {
                 block.serializeCompact(buffer);
                 dataOutputStream.write(buffer.array());
-                buffer.position(0);
+                ((Buffer) buffer).position(0);
             }
             Sha256Hash checkpointsHash = Sha256Hash.wrap(digest.digest());
             System.out.println("Hash of checkpoints data is " + checkpointsHash);
@@ -203,7 +203,7 @@ public class BuildCheckpoints implements Callable<Integer> {
             for (StoredBlock block : checkpoints.values()) {
                 block.serializeCompact(buffer);
                 writer.println(CheckpointManager.BASE64.encode(buffer.array()));
-                buffer.position(0);
+                ((Buffer) buffer).position(0);
             }
             System.out.println("Checkpoints written to '" + file.getCanonicalPath() + "'.");
         }
@@ -230,6 +230,11 @@ public class BuildCheckpoints implements Callable<Integer> {
             checkState(test.getHeight() == 167328);
             checkState(test.getHeader().getHashAsString()
                     .equals("0000000000035ae7d5025c2538067fe7adb1cf5d5d9c31b024137d9090ed13a9"));
+        } else if (params.getId().equals(NetworkParameters.ID_SIGNET)) {
+            StoredBlock test = manager.getCheckpointBefore(1642000000); // 2022-01-12
+            checkState(test.getHeight() == 72576);
+            checkState(test.getHeader().getHashAsString()
+                    .equals("0000008f763bdf23bd159a21ccf211098707671d2ca9aa72d0f586c24505c5e7"));
         }
     }
 

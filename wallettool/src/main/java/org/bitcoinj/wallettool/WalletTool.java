@@ -15,14 +15,12 @@
  * limitations under the License.
  */
 
-package org.bitcoinj.tools;
+package org.bitcoinj.wallettool;
 
 import org.bitcoinj.core.Sha256Hash;
 import org.bitcoinj.core.TransactionOutput;
 import org.bitcoinj.crypto.*;
-import org.bitcoinj.params.MainNetParams;
 import org.bitcoinj.params.RegTestParams;
-import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.protocols.payments.PaymentProtocol;
 import org.bitcoinj.protocols.payments.PaymentProtocolException;
 import org.bitcoinj.protocols.payments.PaymentSession;
@@ -33,6 +31,7 @@ import org.bitcoinj.store.*;
 import org.bitcoinj.uri.BitcoinURI;
 import org.bitcoinj.uri.BitcoinURIParseException;
 import org.bitcoinj.utils.BriefLogFormatter;
+import org.bitcoinj.utils.Network;
 import org.bitcoinj.wallet.CoinSelection;
 import org.bitcoinj.wallet.CoinSelector;
 import org.bitcoinj.wallet.DeterministicKeyChain;
@@ -43,22 +42,18 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.BaseEncoding;
 import com.google.common.io.Resources;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.ByteString;
 
 import org.bitcoinj.core.AbstractBlockChain;
 import org.bitcoinj.core.Address;
 import org.bitcoinj.core.AddressFormatException;
 import org.bitcoinj.core.Base58;
-import org.bitcoinj.core.Block;
 import org.bitcoinj.core.BlockChain;
 import org.bitcoinj.core.CheckpointManager;
 import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.Context;
 import org.bitcoinj.core.DumpedPrivateKey;
 import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.FilteredBlock;
 import org.bitcoinj.core.FullPrunedBlockChain;
 import org.bitcoinj.core.InsufficientMoneyException;
 import org.bitcoinj.core.LegacyAddress;
@@ -71,7 +66,6 @@ import org.bitcoinj.core.StoredBlock;
 import org.bitcoinj.core.Transaction;
 import org.bitcoinj.core.Utils;
 import org.bitcoinj.core.VerificationException;
-import org.bitcoinj.core.listeners.BlocksDownloadedEventListener;
 import org.bitcoinj.core.listeners.DownloadProgressTracker;
 import org.bitcoinj.wallet.MarriedKeyChain;
 import org.bitcoinj.wallet.Protos;
@@ -103,6 +97,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -175,7 +170,7 @@ public class WalletTool implements Callable<Integer> {
             "                       If you omit both options, the creation time is being cleared (set to 0).%n")
     private String actionStr;
     @CommandLine.Option(names = "--net", description = "Which network to connect to. Valid values: ${COMPLETION-CANDIDATES}. Default: ${DEFAULT-VALUE}")
-    private NetworkEnum net = NetworkEnum.MAIN;
+    private Network net = Network.MAIN;
     @CommandLine.Option(names = "--debuglog", description = "Enables logging from the core library.")
     private boolean debugLog = false;
     @CommandLine.Option(names = "--force", description = "Overrides any safety checks on the requested action.")
@@ -206,7 +201,7 @@ public class WalletTool implements Callable<Integer> {
     private String pubKeyStr;
     @CommandLine.Option(names = "--privkey", description = "Specifies a WIF-, hex- or base58-encoded private key.")
     private String privKeyStr;
-    @CommandLine.Option(names = "--addr", description ="Specifies a Bitcoin address, either SegWit or legacy.")
+    @CommandLine.Option(names = "--addr", description ="Specifies a Bitcoin address, either segwit or legacy.")
     private String addrStr;
     @CommandLine.Option(names = "--peers", description = "Comma separated IP addresses/domain names for connections instead of peer discovery.")
     private String peersStr;
@@ -371,25 +366,27 @@ public class WalletTool implements Callable<Integer> {
             java.util.logging.Logger logger = LogManager.getLogManager().getLogger("");
             logger.setLevel(Level.SEVERE);
         }
+        params = net.networkParameters();
+        String fileName;
         switch (net) {
             case MAIN:
             case PROD:
-                params = MainNetParams.get();
-                if (chainFile == null)
-                    chainFile = new File("mainnet.chain");
+                fileName = "mainnet.chain";
                 break;
             case TEST:
-                params = TestNet3Params.get();
-                if (chainFile == null)
-                    chainFile = new File("testnet.chain");
+                fileName = "testnet.chain";
+                break;
+            case SIGNET:
+                fileName = "signet.chain";
                 break;
             case REGTEST:
-                params = RegTestParams.get();
-                if (chainFile == null)
-                    chainFile = new File("regtest.chain");
+                fileName = "regtest.chain";
                 break;
             default:
                 throw new RuntimeException("Unreachable.");
+        }
+        if (chainFile == null) {
+            chainFile = new File(fileName);
         }
         Context.propagate(new Context(params));
 
@@ -478,45 +475,39 @@ public class WalletTool implements Callable<Integer> {
                             return 1;
                         }
                         final Address validSelectAddr = selectAddr;
-                        coinSelector = new CoinSelector() {
-                            @Override
-                            public CoinSelection select(Coin target, List<TransactionOutput> candidates) {
-                                Coin valueGathered = Coin.ZERO;
-                                List<TransactionOutput> gathered = new LinkedList<TransactionOutput>();
-                                for (TransactionOutput candidate : candidates) {
-                                    try {
-                                        Address candidateAddr = candidate.getScriptPubKey().getToAddress(params);
-                                        if (validSelectAddr.equals(candidateAddr)) {
-                                            gathered.add(candidate);
-                                            valueGathered = valueGathered.add(candidate.getValue());
-                                        }
-                                    } catch (ScriptException x) {
-                                        // swallow
+                        coinSelector = (target, candidates) -> {
+                            Coin valueGathered = Coin.ZERO;
+                            List<TransactionOutput> gathered = new LinkedList<TransactionOutput>();
+                            for (TransactionOutput candidate : candidates) {
+                                try {
+                                    Address candidateAddr = candidate.getScriptPubKey().getToAddress(params);
+                                    if (validSelectAddr.equals(candidateAddr)) {
+                                        gathered.add(candidate);
+                                        valueGathered = valueGathered.add(candidate.getValue());
                                     }
+                                } catch (ScriptException x) {
+                                    // swallow
                                 }
-                                return new CoinSelection(valueGathered, gathered);
                             }
+                            return new CoinSelection(valueGathered, gathered);
                         };
                     }
                     if (selectOutputStr != null) {
                         String[] parts = selectOutputStr.split(":", 2);
                         Sha256Hash selectTransactionHash = Sha256Hash.wrap(parts[0]);
                         int selectIndex = Integer.parseInt(parts[1]);
-                        coinSelector = new CoinSelector() {
-                            @Override
-                            public CoinSelection select(Coin target, List<TransactionOutput> candidates) {
-                                Coin valueGathered = Coin.ZERO;
-                                List<TransactionOutput> gathered = new LinkedList<TransactionOutput>();
-                                for (TransactionOutput candidate : candidates) {
-                                    int candicateIndex = candidate.getIndex();
-                                    final Sha256Hash candidateTransactionHash = candidate.getParentTransactionHash();
-                                    if (selectIndex == candicateIndex && selectTransactionHash.equals(candidateTransactionHash)) {
-                                        gathered.add(candidate);
-                                        valueGathered = valueGathered.add(candidate.getValue());
-                                    }
+                        coinSelector = (target, candidates) -> {
+                            Coin valueGathered = Coin.ZERO;
+                            List<TransactionOutput> gathered = new LinkedList<TransactionOutput>();
+                            for (TransactionOutput candidate : candidates) {
+                                int candicateIndex = candidate.getIndex();
+                                final Sha256Hash candidateTransactionHash = candidate.getParentTransactionHash();
+                                if (selectIndex == candicateIndex && selectTransactionHash.equals(candidateTransactionHash)) {
+                                    gathered.add(candidate);
+                                    valueGathered = valueGathered.add(candidate.getValue());
                                 }
-                                return new CoinSelection(valueGathered, gathered);
                             }
+                            return new CoinSelection(valueGathered, gathered);
                         };
                     }
                     send(coinSelector, outputsStr, feePerVkb, lockTimeStr, allowUnconfirmed);
@@ -642,7 +633,7 @@ public class WalletTool implements Callable<Integer> {
             if (aesKey == null)
                 return;
         }
-        Futures.getUnchecked(wallet.doMaintenance(aesKey, true));
+        wallet.doMaintenance(aesKey, true).join();
     }
 
     private void encrypt() {
@@ -825,7 +816,7 @@ public class WalletTool implements Callable<Integer> {
     private void sendPaymentRequest(String location, boolean verifyPki) {
         if (location.startsWith("http") || location.startsWith("bitcoin")) {
             try {
-                ListenableFuture<PaymentSession> future;
+                CompletableFuture<PaymentSession> future;
                 if (location.startsWith("http")) {
                     future = PaymentSession.createFromUrl(location, verifyPki);
                 } else {
@@ -901,7 +892,7 @@ public class WalletTool implements Callable<Integer> {
             }
             setup();
             // No refund address specified, no user-specified memo field.
-            ListenableFuture<PaymentProtocol.Ack> future = session.sendPayment(ImmutableList.of(req.tx), null, null);
+            CompletableFuture<PaymentProtocol.Ack> future = session.sendPayment(ImmutableList.of(req.tx), null, null);
             if (future == null) {
                 // No payment_url for submission so, broadcast and wait.
                 peerGroup.start();
@@ -1138,7 +1129,7 @@ public class WalletTool implements Callable<Integer> {
                     System.err.println("Could not understand --privkey as either WIF, hex or base58: " + privKeyStr);
                     return;
                 }
-                key = ECKey.fromPrivate(new BigInteger(1, decode));
+                key = ECKey.fromPrivate(Utils.bytesToBigInteger(decode));
             }
             if (pubKeyStr != null) {
                 // Give the user a hint.
@@ -1263,14 +1254,18 @@ public class WalletTool implements Callable<Integer> {
                 final KeyParameter aesKey = passwordToKey(true);
                 if (aesKey == null)
                     return; // Error message already printed.
-                System.out.println(wallet.toString(dumpLookAhead, true, aesKey, true, true, chain));
+                printWallet( aesKey);
             } else {
                 System.err.println("Can't dump privkeys, wallet is encrypted.");
                 return;
             }
         } else {
-            System.out.println(wallet.toString(dumpLookAhead, dumpPrivKeys, null, true, true, chain));
+            printWallet( null);
         }
+    }
+
+    private void printWallet(@Nullable KeyParameter aesKey) {
+        System.out.println(wallet.toString(dumpLookAhead, dumpPrivKeys, aesKey, true, true, chain));
     }
 
     private void setCreationTime() {

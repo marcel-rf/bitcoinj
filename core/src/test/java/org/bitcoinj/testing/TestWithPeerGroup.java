@@ -17,7 +17,8 @@
 package org.bitcoinj.testing;
 
 import com.google.common.base.*;
-import com.google.common.util.concurrent.*;
+import com.google.common.util.concurrent.ListeningScheduledExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
 import org.bitcoinj.core.*;
 import org.bitcoinj.net.*;
 import org.bitcoinj.store.*;
@@ -103,13 +104,10 @@ public class TestWithPeerGroup extends TestWithNetworkConnections {
                     public ScheduledFuture<?> schedule(final Runnable command, final long delay, final TimeUnit unit) {
                         if (!blockJobs)
                             return super.schedule(command, delay, unit);
-                        return super.schedule(new Runnable() {
-                            @Override
-                            public void run() {
-                                Utils.rollMockClockMillis(unit.toMillis(delay));
-                                command.run();
-                                jobBlocks.acquireUninterruptibly();
-                            }
+                        return super.schedule(() -> {
+                            Utils.rollMockClockMillis(unit.toMillis(delay));
+                            command.run();
+                            jobBlocks.acquireUninterruptibly();
                         }, 0 /* immediate */, unit);
                     }
                 });
