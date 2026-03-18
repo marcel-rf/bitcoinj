@@ -17,17 +17,17 @@
 package org.bitcoinj.net;
 
 import com.google.common.util.concurrent.AbstractIdleService;
-import com.google.common.util.concurrent.ListenableFuture;
 
 import javax.net.SocketFactory;
 import java.io.IOException;
 import java.net.SocketAddress;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Objects;
 import java.util.Set;
-
-import static com.google.common.base.Preconditions.checkNotNull;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * <p>A thin wrapper around a set of {@link BlockingClient}s.</p>
@@ -40,7 +40,7 @@ public class BlockingClientManager extends AbstractIdleService implements Client
     private final SocketFactory socketFactory;
     private final Set<BlockingClient> clients = Collections.synchronizedSet(new HashSet<BlockingClient>());
 
-    private int connectTimeoutMillis = 1000;
+    private Duration connectTimeout = Duration.ofSeconds(1);
 
     public BlockingClientManager() {
         socketFactory = SocketFactory.getDefault();
@@ -51,23 +51,26 @@ public class BlockingClientManager extends AbstractIdleService implements Client
      * bitcoinj connects to the P2P network.
      */
     public BlockingClientManager(SocketFactory socketFactory) {
-        this.socketFactory = checkNotNull(socketFactory);
+        this.socketFactory = Objects.requireNonNull(socketFactory);
     }
 
     @Override
-    public ListenableFuture<SocketAddress> openConnection(SocketAddress serverAddress, StreamConnection connection) {
+    public CompletableFuture<SocketAddress> openConnection(SocketAddress serverAddress, StreamConnection connection) {
         try {
             if (!isRunning())
                 throw new IllegalStateException();
-            return new BlockingClient(serverAddress, connection, connectTimeoutMillis, socketFactory, clients).getConnectFuture();
+            return new BlockingClient(serverAddress, connection, connectTimeout, socketFactory, clients).getConnectFuture();
         } catch (IOException e) {
             throw new RuntimeException(e); // This should only happen if we are, eg, out of system resources
         }
     }
 
-    /** Sets the number of milliseconds to wait before giving up on a connect attempt */
-    public void setConnectTimeoutMillis(int connectTimeoutMillis) {
-        this.connectTimeoutMillis = connectTimeoutMillis;
+    /**
+     * Sets the number of milliseconds to wait before giving up on a connect attempt
+     * @param connectTimeout timeout for establishing a connection to the client
+     */
+    public void setConnectTimeout(Duration connectTimeout) {
+        this.connectTimeout = connectTimeout;
     }
 
     @Override

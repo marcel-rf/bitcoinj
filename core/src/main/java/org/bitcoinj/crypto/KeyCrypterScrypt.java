@@ -6,7 +6,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://opensource.org/licenses/mit-license.php
+ *    https://opensource.org/license/mit/
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,28 +17,23 @@
 
 package org.bitcoinj.crypto;
 
-import com.google.common.base.Stopwatch;
-import com.google.protobuf.ByteString;
-import org.bitcoinj.core.Utils;
-import org.bitcoinj.wallet.Protos;
-import org.bitcoinj.wallet.Protos.ScryptParameters;
-import org.bitcoinj.wallet.Protos.Wallet.EncryptionType;
-import org.bouncycastle.crypto.engines.AESEngine;
-import org.bouncycastle.crypto.generators.SCrypt;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.bitcoinj.base.internal.Stopwatch;
+import org.bitcoinj.base.internal.TimeUtils;
 import org.bouncycastle.crypto.BufferedBlockCipher;
 import org.bouncycastle.crypto.InvalidCipherTextException;
+import org.bouncycastle.crypto.engines.AESEngine;
+import org.bouncycastle.crypto.generators.SCrypt;
 import org.bouncycastle.crypto.modes.CBCBlockCipher;
 import org.bouncycastle.crypto.paddings.PaddedBufferedBlockCipher;
 import org.bouncycastle.crypto.params.KeyParameter;
 import org.bouncycastle.crypto.params.ParametersWithIV;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.security.SecureRandom;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Objects;
-
-import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * <p>This class encrypts and decrypts byte arrays and strings using scrypt as the
@@ -75,10 +70,6 @@ public class KeyCrypterScrypt implements KeyCrypter {
     public static final int SALT_LENGTH = 8;
 
     static {
-        // Init proper random number generator, as some old Android installations have bugs that make it unsecure.
-        if (Utils.isAndroidRuntime())
-            new LinuxSecureRandom();
-
         secureRandom = new SecureRandom();
     }
 
@@ -98,9 +89,7 @@ public class KeyCrypterScrypt implements KeyCrypter {
      * Encryption/Decryption using default parameters and a random salt.
      */
     public KeyCrypterScrypt() {
-        Protos.ScryptParameters.Builder scryptParametersBuilder = Protos.ScryptParameters.newBuilder().setSalt(
-                ByteString.copyFrom(randomSalt()));
-        this.scryptParameters = scryptParametersBuilder.build();
+        this(new KeyCrypter.ScryptParameters());
     }
 
     /**
@@ -111,9 +100,7 @@ public class KeyCrypterScrypt implements KeyCrypter {
      *            number of scrypt iterations
      */
     public KeyCrypterScrypt(int iterations) {
-        Protos.ScryptParameters.Builder scryptParametersBuilder = Protos.ScryptParameters.newBuilder()
-                .setSalt(ByteString.copyFrom(randomSalt())).setN(iterations);
-        this.scryptParameters = scryptParametersBuilder.build();
+        this(KeyCrypter.ScryptParameters.withN(iterations));
     }
 
     /**
@@ -123,12 +110,11 @@ public class KeyCrypterScrypt implements KeyCrypter {
      * @throws NullPointerException if the scryptParameters or any of its N, R or P is null.
      */
     public KeyCrypterScrypt(ScryptParameters scryptParameters) {
-        this.scryptParameters = checkNotNull(scryptParameters);
+        this.scryptParameters = Objects.requireNonNull(scryptParameters);
         // Check there is a non-empty salt.
         // (Some early MultiBit wallets has a missing salt so it is not a hard fail).
-        if (scryptParameters.getSalt() == null
-                || scryptParameters.getSalt().toByteArray() == null
-                || scryptParameters.getSalt().toByteArray().length == 0) {
+        if (scryptParameters.salt() == null
+                || scryptParameters.salt().length == 0) {
             log.warn("You are using a ScryptParameters with no salt. Your encryption may be vulnerable to a dictionary attack.");
         }
     }
@@ -139,28 +125,27 @@ public class KeyCrypterScrypt implements KeyCrypter {
      * This is a very slow operation compared to encrypt/ decrypt so it is normally worth caching the result.
      *
      * @param password    The password to use in key generation
-     * @return            The KeyParameter containing the created AES key
+     * @return            The AesKey containing the created AES key
      * @throws            KeyCrypterException
      */
     @Override
-    public KeyParameter deriveKey(CharSequence password) throws KeyCrypterException {
+    public AesKey deriveKey(CharSequence password) throws KeyCrypterException {
         byte[] passwordBytes = null;
         try {
             passwordBytes = convertToByteArray(password);
             byte[] salt = new byte[0];
-            if ( scryptParameters.getSalt() != null) {
-                salt = scryptParameters.getSalt().toByteArray();
+            if ( scryptParameters.salt() != null) {
+                salt = scryptParameters.salt();
             } else {
                 // Warn the user that they are not using a salt.
                 // (Some early MultiBit wallets had a blank salt).
                 log.warn("You are using a ScryptParameters with no salt. Your encryption may be vulnerable to a dictionary attack.");
             }
 
-            final Stopwatch watch = Stopwatch.createStarted();
-            byte[] keyBytes = SCrypt.generate(passwordBytes, salt, (int) scryptParameters.getN(), scryptParameters.getR(), scryptParameters.getP(), KEY_LENGTH);
-            watch.stop();
+            Stopwatch watch = Stopwatch.start();
+            byte[] keyBytes = SCrypt.generate(passwordBytes, salt, scryptParameters.n(), scryptParameters.r(), scryptParameters.p(), KEY_LENGTH);
             log.info("Deriving key took {} for {}.", watch, scryptParametersString());
-            return new KeyParameter(keyBytes);
+            return new AesKey(keyBytes);
         } catch (Exception e) {
             throw new KeyCrypterException("Could not generate key from password and salt.", e);
         } finally {
@@ -175,16 +160,16 @@ public class KeyCrypterScrypt implements KeyCrypter {
      * Password based encryption using AES - CBC 256 bits.
      */
     @Override
-    public EncryptedData encrypt(byte[] plainBytes, KeyParameter aesKey) throws KeyCrypterException {
-        checkNotNull(plainBytes);
-        checkNotNull(aesKey);
+    public EncryptedData encrypt(byte[] plainBytes, AesKey aesKey) throws KeyCrypterException {
+        Objects.requireNonNull(plainBytes);
+        Objects.requireNonNull(aesKey);
 
         try {
             // Generate iv - each encryption call has a different iv.
             byte[] iv = new byte[BLOCK_LENGTH];
             secureRandom.nextBytes(iv);
 
-            ParametersWithIV keyWithIv = new ParametersWithIV(aesKey, iv);
+            ParametersWithIV keyWithIv = new ParametersWithIV(new KeyParameter(aesKey.bytes()), iv);
 
             // Encrypt using AES.
             BufferedBlockCipher cipher = new PaddedBufferedBlockCipher(new CBCBlockCipher(new AESEngine()));
@@ -208,12 +193,12 @@ public class KeyCrypterScrypt implements KeyCrypter {
      * @throws                 KeyCrypterException if bytes could not be decrypted
      */
     @Override
-    public byte[] decrypt(EncryptedData dataToDecrypt, KeyParameter aesKey) throws KeyCrypterException {
-        checkNotNull(dataToDecrypt);
-        checkNotNull(aesKey);
+    public byte[] decrypt(EncryptedData dataToDecrypt, AesKey aesKey) throws KeyCrypterException {
+        Objects.requireNonNull(dataToDecrypt);
+        Objects.requireNonNull(aesKey);
 
         try {
-            ParametersWithIV keyWithIv = new ParametersWithIV(new KeyParameter(aesKey.getKey()), dataToDecrypt.initialisationVector);
+            ParametersWithIV keyWithIv = new ParametersWithIV(new KeyParameter(aesKey.bytes()), dataToDecrypt.initialisationVector);
 
             // Decrypt the message.
             BufferedBlockCipher cipher = new PaddedBufferedBlockCipher(new CBCBlockCipher(new AESEngine()));
@@ -238,7 +223,7 @@ public class KeyCrypterScrypt implements KeyCrypter {
      * Note: a String.getBytes() is not used to avoid creating a String of the password in the JVM.
      */
     private static byte[] convertToByteArray(CharSequence charSequence) {
-        checkNotNull(charSequence);
+        Objects.requireNonNull(charSequence);
 
         byte[] byteArray = new byte[charSequence.length() << 1];
         for(int i = 0; i < charSequence.length(); i++) {
@@ -268,7 +253,7 @@ public class KeyCrypterScrypt implements KeyCrypter {
     }
 
     private String scryptParametersString() {
-        return "N=" + scryptParameters.getN() + ", r=" + scryptParameters.getR() + ", p=" + scryptParameters.getP();
+        return "N=" + scryptParameters.n() + ", r=" + scryptParameters.r() + ", p=" + scryptParameters.p();
     }
 
     @Override

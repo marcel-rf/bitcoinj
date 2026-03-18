@@ -23,43 +23,54 @@
 
 package org.bitcoinj.crypto;
 
+import org.bitcoinj.base.internal.ByteUtils;
+import org.bitcoinj.base.internal.Preconditions;
+
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.util.Objects;
 
 /**
- * <p>This is a clean-room implementation of PBKDF2 using RFC 2898 as a reference.</p>
- *
- * <p>RFC 2898: http://tools.ietf.org/html/rfc2898#section-5.2</p>
- *
- * <p>This code passes all RFC 6070 test vectors: http://tools.ietf.org/html/rfc6070</p>
- *
- * <p>http://cryptofreek.org/2012/11/29/pbkdf2-pure-java-implementation/<br>
- * Modified to use SHA-512 - Ken Sedgwick ken@bonsai.com</p>
+ * This is a clean-room implementation of PBKDF2 using RFC 2898 as a reference.
+ * Modified to use SHA-512 by Ken Sedgwick (ken@bonsai.com)
+ * @see <a href="https://datatracker.ietf.org/doc/html/rfc2898#section-5.2">RFC 2898 (Section 5.2)</a>
+ * @see <a href="https://cryptofreek.org/2012/11/29/pbkdf2-pure-java-implementation/">PBKDF2 – Pure Java Implementation by Cryptofreek</a>
  */
 public class PBKDF2SHA512 {
+    // Length of HMAC result
+    private static final int H_LEN = 64;
+
+    /**
+     * Derive a key using PBKDF2-SHA512
+     * @param P password
+     * @param S salt
+     * @param c iteration count, a positive integer
+     * @param dkLen intended length in octets of the derived key, a positive integer
+     * @return derived key
+     */
     public static byte[] derive(String P, String S, int c, int dkLen) {
+        Preconditions.checkArgument(c > 0, () -> "count must be greater than zero");
+        Preconditions.checkArgument(dkLen > 0, () -> "derived key length must be greater than zero");
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
+        // The algorithm in RFC 2898 section 5.2, says to check `dkLen` is not greater than (2^32 - 1) * `H_LEN`
+        // But that is not possible given `dkLen` is an `int` argument, so we omit the check.
         try {
-            int hLen = 20;
+            int l = (dkLen + H_LEN - 1) / H_LEN;    // Divide by H_LEN with rounding up
+            // int r = dkLen - (l-1)*hLen;
 
-            if (dkLen > ((Math.pow(2, 32)) - 1) * hLen) {
-                throw new IllegalArgumentException("derived key too long");
-            } else {
-                int l = (int) Math.ceil((double) dkLen / (double) hLen);
-                // int r = dkLen - (l-1)*hLen;
-
-                for (int i = 1; i <= l; i++) {
-                    byte[] T = F(P, S, c, i);
-                    baos.write(T);
-                }
+            for (int i = 1; i <= l; i++) {
+                byte[] T = F(P, S, c, i);
+                baos.write(T);
             }
-        } catch (Exception e) {
+        } catch (IOException | NoSuchAlgorithmException | InvalidKeyException e) {
             throw new RuntimeException(e);
         }
 
@@ -69,7 +80,7 @@ public class PBKDF2SHA512 {
         return baDerived;
     }
 
-    private static byte[] F(String P, String S, int c, int i) throws Exception {
+    private static byte[] F(String P, String S, int c, int i) throws NoSuchAlgorithmException, InvalidKeyException {
         byte[] U_LAST = null;
         byte[] U_XOR = null;
 
@@ -79,20 +90,14 @@ public class PBKDF2SHA512 {
 
         for (int j = 0; j < c; j++) {
             if (j == 0) {
-                byte[] baS = S.getBytes(StandardCharsets.UTF_8);
-                byte[] baI = INT(i);
-                byte[] baU = new byte[baS.length + baI.length];
-
-                System.arraycopy(baS, 0, baU, 0, baS.length);
-                System.arraycopy(baI, 0, baU, baS.length, baI.length);
+                byte[] baU = ByteUtils.concat(S.getBytes(StandardCharsets.UTF_8), INT(i));
 
                 U_XOR = mac.doFinal(baU);
                 U_LAST = U_XOR;
-                mac.reset();
             } else {
                 byte[] baU = mac.doFinal(U_LAST);
-                mac.reset();
 
+                Objects.requireNonNull(U_XOR);
                 for (int k = 0; k < U_XOR.length; k++) {
                     U_XOR[k] = (byte) (U_XOR[k] ^ baU[k]);
                 }
@@ -101,14 +106,14 @@ public class PBKDF2SHA512 {
             }
         }
 
+        Objects.requireNonNull(U_XOR);
         return U_XOR;
     }
 
     private static byte[] INT(int i) {
-        ByteBuffer bb = ByteBuffer.allocate(4);
-        bb.order(ByteOrder.BIG_ENDIAN);
-        bb.putInt(i);
-
-        return bb.array();
+        return ByteBuffer.allocate(4)
+                .order(ByteOrder.BIG_ENDIAN)
+                .putInt(i)
+                .array();
     }
 }

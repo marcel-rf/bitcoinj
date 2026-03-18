@@ -17,22 +17,21 @@
 
 package org.bitcoinj.examples;
 
-import org.bitcoinj.core.Address;
-import org.bitcoinj.core.Base58;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.Base58;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.ScriptType;
 import org.bitcoinj.core.BlockChain;
-import org.bitcoinj.core.DumpedPrivateKey;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.LegacyAddress;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.PeerAddress;
 import org.bitcoinj.core.PeerGroup;
-import org.bitcoinj.params.MainNetParams;
-import org.bitcoinj.script.Script;
+import org.bitcoinj.crypto.DumpedPrivateKey;
+import org.bitcoinj.crypto.ECKey;
 import org.bitcoinj.store.MemoryBlockStore;
 import org.bitcoinj.wallet.Wallet;
 
 import java.math.BigInteger;
-import java.net.InetAddress;
 
 /**
  * This example shows how to solve the challenge Hal posted here:<p>
@@ -46,33 +45,35 @@ import java.net.InetAddress;
 public class PrivateKeys {
     public static void main(String[] args) throws Exception {
         // TODO: Assumes main network not testnet. Make it selectable.
-        NetworkParameters params = MainNetParams.get();
+        Network network = BitcoinNetwork.MAINNET;
+        NetworkParameters params = NetworkParameters.of(network);
         try {
             // Decode the private key from Satoshis Base58 variant. If 51 characters long then it's from Bitcoins
             // dumpprivkey command and includes a version byte and checksum, or if 52 characters long then it has 
             // compressed pub key. Otherwise assume it's a raw key.
             ECKey key;
             if (args[0].length() == 51 || args[0].length() == 52) {
-                DumpedPrivateKey dumpedPrivateKey = DumpedPrivateKey.fromBase58(params, args[0]);
+                DumpedPrivateKey dumpedPrivateKey = DumpedPrivateKey.fromBase58(network, args[0]);
                 key = dumpedPrivateKey.getKey();
             } else {
                 BigInteger privKey = Base58.decodeToBigInteger(args[0]);
                 key = ECKey.fromPrivate(privKey);
             }
-            System.out.println("Address from private key is: " + LegacyAddress.fromKey(params, key).toString());
-            // And the address ...
-            Address destination = LegacyAddress.fromBase58(params, args[1]);
+            System.out.println("Address from private key is: " + key.toAddress(ScriptType.P2WPKH, network).toString());
 
             // Import the private key to a fresh wallet.
-            Wallet wallet = Wallet.createDeterministic(params, Script.ScriptType.P2PKH);
+            Wallet wallet = Wallet.createDeterministic(network, ScriptType.P2PKH);
             wallet.importKey(key);
 
-            // Find the transactions that involve those coins.
-            final MemoryBlockStore blockStore = new MemoryBlockStore(params);
-            BlockChain chain = new BlockChain(params, wallet, blockStore);
+            // And the address ...
+            Address destination = wallet.parseAddress(args[1]);
 
-            final PeerGroup peerGroup = new PeerGroup(params, chain);
-            peerGroup.addAddress(new PeerAddress(params, InetAddress.getLocalHost()));
+            // Find the transactions that involve those coins.
+            final MemoryBlockStore blockStore = new MemoryBlockStore(params.getGenesisBlock());
+            BlockChain chain = new BlockChain(network, wallet, blockStore);
+
+            final PeerGroup peerGroup = new PeerGroup(network, chain);
+            peerGroup.addAddress(PeerAddress.localhost(params));
             peerGroup.startAsync();
             peerGroup.downloadBlockChain();
 

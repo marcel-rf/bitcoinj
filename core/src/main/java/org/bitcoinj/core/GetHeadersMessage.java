@@ -16,6 +16,17 @@
 
 package org.bitcoinj.core;
 
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.base.VarInt;
+import org.bitcoinj.base.internal.ByteUtils;
+
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.bitcoinj.base.internal.Preconditions.check;
+
 /**
  * <p>The "getheaders" command is structurally identical to "getblocks", but has different meaning. On receiving this
  * message a Bitcoin node returns matching blocks up to the limit, but without the bodies. It is useful as an
@@ -25,12 +36,30 @@ package org.bitcoinj.core;
  * <p>Instances of this class are not safe for use by multiple threads.</p>
  */
 public class GetHeadersMessage extends GetBlocksMessage {
-    public GetHeadersMessage(NetworkParameters params, BlockLocator locator, Sha256Hash stopHash) {
-        super(params, locator, stopHash);
+    /**
+     * Deserialize this message from a given payload.
+     *
+     * @param payload payload to deserialize from
+     * @return read message
+     * @throws BufferUnderflowException if the read message extends beyond the remaining bytes of the payload
+     */
+    public static GetHeadersMessage read(ByteBuffer payload) throws BufferUnderflowException, ProtocolException {
+        long version = ByteUtils.readUint32(payload);
+        VarInt startCountVarInt = VarInt.read(payload);
+        check(startCountVarInt.fitsInt(), BufferUnderflowException::new);
+        int startCount = startCountVarInt.intValue();
+        if (startCount > 500)
+            throw new ProtocolException("Number of locators cannot be > 500, received: " + startCount);
+        List<Sha256Hash> hashList = new ArrayList<>();
+        for (int i = 0; i < startCount; i++) {
+            hashList.add(Sha256Hash.read(payload));
+        }
+        Sha256Hash stopHash = Sha256Hash.read(payload);
+        return new GetHeadersMessage(version, new BlockLocator(hashList), stopHash);
     }
 
-    public GetHeadersMessage(NetworkParameters params, byte[] payload) throws ProtocolException {
-        super(params, payload);
+    public GetHeadersMessage(long protocolVersion, BlockLocator locator, Sha256Hash stopHash) {
+        super(protocolVersion, locator, stopHash);
     }
 
     @Override

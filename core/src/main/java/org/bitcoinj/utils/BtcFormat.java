@@ -16,21 +16,12 @@
 
 package org.bitcoinj.utils;
 
+import org.bitcoinj.base.Coin;
 import org.bitcoinj.utils.BtcAutoFormat.Style;
-import static org.bitcoinj.utils.BtcAutoFormat.Style.*;
-
-import org.bitcoinj.core.Coin;
-import java.util.Objects;
-import com.google.common.collect.ImmutableList;
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
-import com.google.common.base.Strings;
+import org.jspecify.annotations.Nullable;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
-
-import static java.math.RoundingMode.HALF_UP;
-
 import java.text.AttributedCharacterIterator;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
@@ -39,12 +30,20 @@ import java.text.Format;
 import java.text.NumberFormat;
 import java.text.ParseException;
 import java.text.ParsePosition;
-
-import java.util.Locale;
-import java.util.List;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static java.math.RoundingMode.HALF_UP;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
+import static org.bitcoinj.utils.BtcAutoFormat.Style.CODE;
+import static org.bitcoinj.utils.BtcAutoFormat.Style.SYMBOL;
 
 /**
  * <p>Instances of this class format and parse locale-specific numerical
@@ -408,7 +407,7 @@ import java.util.regex.Pattern;
  * interpret every number as being denominated in the units that were specified when
  * constructing the instance doing the parsing.  This default behavior of {@link
  * BtcFixedFormat} can be overridden by setting a parsing pattern that includes a currency sign
- * using the {@link BtcFormat.Builder#pattern()} method.</p>
+ * using the {@link BtcFormat#pattern()} method.</p>
  *
  * <p>The {@link BtcAutoFormat#parse(String)} method of {@link BtcAutoFormat} (and of
  * {@link BtcAutoFormat} configured with applicable non-default pattern) will recognize a
@@ -680,7 +679,7 @@ public abstract class BtcFormat extends Format {
          *  <p>Note that by applying a pattern you override the configured formatting style of
          *  {@link BtcAutoFormat} instances.  */
         public Builder pattern(String val) {
-            if (localizedPattern != "")
+            if (!isNullOrEmpty(localizedPattern))
                 throw new IllegalStateException("You cannot invoke both pattern() and localizedPattern()");
             pattern = val;
             return this;
@@ -714,7 +713,7 @@ public abstract class BtcFormat extends Format {
          *  <p>Note that by applying a pattern you override the configured formatting style of
          *  {@link BtcAutoFormat} instances.         */
         public Builder localizedPattern(String val) {
-            if (pattern != "")
+            if (!isNullOrEmpty(pattern))
                 throw new IllegalStateException("You cannot invoke both pattern() and localizedPattern().");
             localizedPattern = val;
             return this;
@@ -724,16 +723,16 @@ public abstract class BtcFormat extends Format {
          *  to the state of this {@code Builder} instance at the time this method is invoked. */
         public BtcFormat build() {
             BtcFormat f = variant.newInstance(this);
-            if (symbol != "" || code != "") { synchronized(f.numberFormat) {
+            if (!isNullOrEmpty(symbol) || !isNullOrEmpty(code)) { synchronized(f.numberFormat) {
                 DecimalFormatSymbols defaultSigns = f.numberFormat.getDecimalFormatSymbols();
                 setSymbolAndCode(f.numberFormat,
-                    symbol != "" ? symbol : defaultSigns.getCurrencySymbol(),
-                    code != "" ? code : defaultSigns.getInternationalCurrencySymbol()
+                        !isNullOrEmpty(symbol) ? symbol : defaultSigns.getCurrencySymbol(),
+                        !isNullOrEmpty(code) ? code : defaultSigns.getInternationalCurrencySymbol()
                 );
             }}
-            if (localizedPattern != "" || pattern != "") {
+            if (!isNullOrEmpty(localizedPattern) || !isNullOrEmpty(pattern)) {
                 int places = f.numberFormat.getMinimumFractionDigits();
-                if (localizedPattern != "") f.numberFormat.applyLocalizedPattern(negify(localizedPattern));
+                if (!isNullOrEmpty(localizedPattern)) f.numberFormat.applyLocalizedPattern(negify(localizedPattern));
                 else f.numberFormat.applyPattern(negify(pattern));
                 f.numberFormat.setMinimumFractionDigits(places);
                 f.numberFormat.setMaximumFractionDigits(places);
@@ -748,7 +747,8 @@ public abstract class BtcFormat extends Format {
 
     /** This single constructor is invoked by the overriding subclass constructors. */
     protected BtcFormat(DecimalFormat numberFormat, int minDecimals, List<Integer> groups) {
-        checkArgument(minDecimals >= 0, "There can be no fewer than zero fractional decimal places");
+        checkArgument(minDecimals >= 0, () ->
+                "there can be no fewer than zero fractional decimal places");
         this.numberFormat = numberFormat;
         this.numberFormat.setParseBigDecimal(true);
         this.numberFormat.setRoundingMode(HALF_UP);
@@ -931,7 +931,8 @@ public abstract class BtcFormat extends Format {
     private static List<Integer> boxAsList(int[] elements) throws IllegalArgumentException {
         List<Integer> list = new ArrayList<>(elements.length);
         for (int e : elements) {
-            checkArgument(e > 0, "Size of decimal group must be at least one.");
+            checkArgument(e > 0, () ->
+                    "size of decimal group must be at least one.");
             list.add(e);
         }
         return list;
@@ -1187,7 +1188,8 @@ public abstract class BtcFormat extends Format {
 
     private StringBuffer format(Object qty, StringBuffer toAppendTo, FieldPosition pos,
                                             int minDecimals, List<Integer> fractionGroups) {
-        checkArgument(minDecimals >= 0, "There can be no fewer than zero fractional decimal places");
+        checkArgument(minDecimals >= 0, () ->
+                "there can be no fewer than zero fractional decimal places");
         synchronized (numberFormat) {
             DecimalFormatSymbols anteSigns = numberFormat.getDecimalFormatSymbols();
             BigDecimal denominatedUnitCount = denominateAndRound(inSatoshis(qty), minDecimals, fractionGroups);
@@ -1235,11 +1237,13 @@ public abstract class BtcFormat extends Format {
     /** Sets the number of fractional decimal places to be displayed on the given
      *  NumberFormat object to the value of the given integer.
      *  @return The minimum and maximum fractional places settings that the
-     *          formatter had before this change, as an ImmutableList. */
-    private static ImmutableList<Integer> setFormatterDigits(DecimalFormat formatter, int min, int max) {
-        ImmutableList<Integer> ante = ImmutableList.of(
-            formatter.getMinimumFractionDigits(),
-            formatter.getMaximumFractionDigits()
+     *          formatter had before this change, as an unmodifiable List. */
+    private static List<Integer> setFormatterDigits(DecimalFormat formatter, int min, int max) {
+        List<Integer> ante = Collections.unmodifiableList(
+            Arrays.asList(
+                formatter.getMinimumFractionDigits(),
+                formatter.getMaximumFractionDigits()
+            )
         );
         formatter.setMinimumFractionDigits(min);
         formatter.setMaximumFractionDigits(max);
@@ -1306,9 +1310,10 @@ public abstract class BtcFormat extends Format {
       * {@link Coin} object that represents the parsed value.
       * @see NumberFormat */
     @Override
+    @Nullable
     public final Object parseObject(String source, ParsePosition pos) { return parse(source, pos); }
 
-    private class ScaleMatcher {
+    private static class ScaleMatcher {
         public Pattern pattern;
         public int scale;
         ScaleMatcher(Pattern p, int s) { pattern = p; scale = s; }
@@ -1317,8 +1322,8 @@ public abstract class BtcFormat extends Format {
     /* Lazy initialization;  No reason to create all these objects unless needed for parsing */
     // coin indicator regex String; TODO: does this need to be volatile?
     private volatile String ci = "(" + COIN_SYMBOL + "|" + COIN_SYMBOL_ALT + "|B⃦|" + COIN_CODE + "|XBT)";
-    private Pattern coinPattern;
-    private volatile ScaleMatcher[] denoms;
+    private @Nullable Pattern coinPattern;
+    private volatile ScaleMatcher @Nullable [] denoms;
     ScaleMatcher[] denomMatchers() {
         ScaleMatcher[] result = denoms;
         if (result == null) { synchronized(this) {
@@ -1409,6 +1414,7 @@ public abstract class BtcFormat extends Format {
      * @return a Coin object representing the parsed value
      * @see java.text.ParsePosition
      */
+    @Nullable
     public Coin parse(String source, ParsePosition pos) {
         DecimalFormatSymbols anteSigns = null;
         int parseScale = COIN_SCALE; // default
@@ -1424,6 +1430,7 @@ public abstract class BtcFormat extends Format {
                     }
                 }
                 if (parseScale == COIN_SCALE) {
+                    Objects.requireNonNull(coinPattern);
                     Matcher matcher = coinPattern.matcher(source);
                     matcher.find();
                     anteSigns = setSymbolAndCode(numberFormat, matcher.group());
@@ -1545,7 +1552,7 @@ public abstract class BtcFormat extends Format {
     public String pattern() { synchronized(numberFormat) {
         StringBuilder groups = new StringBuilder();
         for (int group : decimalGroups) {
-            groups.append("(").append(Strings.repeat("#", group)).append(")");
+            groups.append("(").append(String.join("", Collections.nCopies(group, "#"))).append(")");
         }
         DecimalFormatSymbols s = numberFormat.getDecimalFormatSymbols();
         String digit = String.valueOf(s.getDigit());
@@ -1591,4 +1598,7 @@ public abstract class BtcFormat extends Format {
         return Objects.hash(pattern(), symbols(), minimumFractionDigits, decimalGroups);
     }
 
+    private static boolean isNullOrEmpty(String s) {
+        return s == null || s.isEmpty();
+    }
 }

@@ -16,6 +16,7 @@
 
 package org.bitcoinj.walletfx.controls;
 
+import org.jspecify.annotations.Nullable;
 import javafx.animation.Interpolator;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
@@ -36,8 +37,6 @@ import org.bitcoinj.walletfx.utils.GuiUtils;
 import org.bitcoinj.walletfx.utils.easing.EasingMode;
 import org.bitcoinj.walletfx.utils.easing.ElasticInterpolator;
 
-import javax.annotation.Nullable;
-
 /**
  * Wraps the given Node in a BorderPane and allows a thin bar to slide in from the bottom or top, squeezing the content
  * node. The API allows different "items" to be added/removed and they will be displayed one at a time, fading between
@@ -48,10 +47,10 @@ public class NotificationBarPane extends BorderPane {
     public static final Duration ANIM_IN_DURATION = GuiUtils.UI_ANIMATION_TIME.multiply(2);
     public static final Duration ANIM_OUT_DURATION = GuiUtils.UI_ANIMATION_TIME;
 
-    private HBox bar;
-    private Label label;
+    private final HBox bar;
+    private final Label label;
     private double barHeight;
-    private ProgressBar progressBar;
+    private final ProgressBar progressBar;
 
     public class Item {
         public final SimpleStringProperty label;

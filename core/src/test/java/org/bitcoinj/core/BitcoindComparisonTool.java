@@ -17,20 +17,39 @@
 
 package org.bitcoinj.core;
 
-import com.google.common.base.*;
-import com.google.common.collect.*;
-import org.bitcoinj.core.listeners.*;
-import org.bitcoinj.net.*;
-import org.bitcoinj.params.*;
-import org.bitcoinj.store.*;
-import org.bitcoinj.utils.*;
-import org.slf4j.*;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.net.NioClient;
+import org.bitcoinj.params.BitcoinNetworkParams;
+import org.bitcoinj.params.RegTestParams;
+import org.bitcoinj.store.BlockStoreException;
+import org.bitcoinj.store.FullPrunedBlockStore;
+import org.bitcoinj.store.MemoryBlockStore;
+import org.bitcoinj.store.MemoryFullPrunedBlockStore;
+import org.bitcoinj.utils.BlockFileLoader;
+import org.bitcoinj.utils.BriefLogFormatter;
+import org.bitcoinj.utils.Threading;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.*;
-import java.net.*;
-import java.util.*;
+import java.io.File;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * A tool for comparing the blocks which are accepted/rejected by bitcoind/bitcoinj
@@ -40,7 +59,7 @@ import java.util.concurrent.atomic.*;
 public class BitcoindComparisonTool {
     private static final Logger log = LoggerFactory.getLogger(BitcoindComparisonTool.class);
 
-    private static final NetworkParameters PARAMS = RegTestParams.get();
+    private static final BitcoinNetworkParams PARAMS = RegTestParams.get();
     private static FullPrunedBlockChain chain;
     private static Sha256Hash bitcoindChainHead;
     private static volatile InventoryMessage mostRecentInv = null;
@@ -54,21 +73,18 @@ public class BitcoindComparisonTool {
         System.out.println("USAGE: bitcoinjBlockStoreLocation runExpensiveTests(1/0) [port=18444]");
         boolean runExpensiveTests = args.length > 1 && Integer.parseInt(args[1]) == 1;
 
-        Context ctx = new Context(PARAMS);
-
         File blockFile = File.createTempFile("testBlocks", ".dat");
         blockFile.deleteOnExit();
 
         FullBlockTestGenerator generator = new FullBlockTestGenerator(PARAMS);
         final RuleList blockList = generator.getBlocksToTest(false, runExpensiveTests, blockFile);
         final Map<Sha256Hash, Block> preloadedBlocks = new HashMap<>();
-        final Iterator<Block> blocks = new BlockFileLoader(PARAMS, Arrays.asList(blockFile));
+        final Iterator<Block> blocks = new BlockFileLoader(PARAMS.network(), Arrays.asList(blockFile)).iterator();
 
         try {
-            H2FullPrunedBlockStore store = new H2FullPrunedBlockStore(PARAMS, args.length > 0 ? args[0] : "BitcoindComparisonTool", blockList.maximumReorgBlockCount);
-            store.resetStore();
+            FullPrunedBlockStore store = new MemoryFullPrunedBlockStore(PARAMS, blockList.maximumReorgBlockCount);
             //store = new MemoryFullPrunedBlockStore(params, blockList.maximumReorgBlockCount);
-            chain = new FullPrunedBlockChain(PARAMS, store);
+            chain = new FullPrunedBlockChain(PARAMS.network(), store);
         } catch (BlockStoreException e) {
             e.printStackTrace();
             System.exit(1);
@@ -76,10 +92,10 @@ public class BitcoindComparisonTool {
 
         VersionMessage ver = new VersionMessage(PARAMS, 42);
         ver.appendToSubVer("BlockAcceptanceComparisonTool", "1.1", null);
-        ver.localServices = VersionMessage.NODE_NETWORK;
-        final Peer bitcoind = new Peer(PARAMS, ver, new PeerAddress(PARAMS, InetAddress.getLocalHost()),
-                new BlockChain(PARAMS, new MemoryBlockStore(PARAMS)));
-        Preconditions.checkState(bitcoind.getVersionMessage().hasBlockChain());
+        ver.localServices = Services.of(Services.NODE_NETWORK);
+        final Peer bitcoind = new Peer(PARAMS, ver, PeerAddress.localhost(PARAMS),
+                new BlockChain(PARAMS.network(), new MemoryBlockStore(PARAMS.getGenesisBlock())));
+        checkState(bitcoind.getVersionMessage().services().has(Services.NODE_NETWORK));
 
         final BlockWrapper currentBlock = new BlockWrapper();
 
@@ -101,7 +117,7 @@ public class BitcoindComparisonTool {
             }
             log.info("bitcoind connected");
             // Make sure bitcoind has no blocks
-            bitcoind.setDownloadParameters(0, false);
+            bitcoind.setDownloadParameters(false);
             bitcoind.startBlockChainDownload();
             connectedFuture.complete(null);
         });
@@ -113,8 +129,9 @@ public class BitcoindComparisonTool {
 
         bitcoind.addPreMessageReceivedEventListener(Threading.SAME_THREAD, (peer, m) -> {
             if (m instanceof HeadersMessage) {
-                if (!((HeadersMessage) m).getBlockHeaders().isEmpty()) {
-                    Block b = Iterables.getLast(((HeadersMessage) m).getBlockHeaders());
+                List<Block> headers = ((HeadersMessage) m).getBlockHeaders();
+                if (!headers.isEmpty()) {
+                    Block b = headers.get(headers.size() - 1);
                     log.info("Got header from bitcoind " + b.getHashAsString());
                     bitcoindChainHead = b.getHash();
                 } else
@@ -151,7 +168,7 @@ public class BitcoindComparisonTool {
                     Block it = blockList.hashHeaderMap.get(currentBlock.block.getHash());
                     while (it != null) {
                         headers.addFirst(it);
-                        it = blockList.hashHeaderMap.get(it.getPrevBlockHash());
+                        it = blockList.hashHeaderMap.get(it.prevHash());
                     }
                     LinkedList<Block> sendHeaders = new LinkedList<>();
                     boolean found = false;
@@ -159,7 +176,7 @@ public class BitcoindComparisonTool {
                         for (Block b : headers) {
                             if (found) {
                                 sendHeaders.addLast(b);
-                                log.info("Sending header (" + b.getPrevBlockHash() + ") -> " + b.getHash());
+                                log.info("Sending header (" + b.prevHash() + ") -> " + b.getHash());
                                 if (b.getHash().equals(((GetHeadersMessage) m).getStopHash()))
                                     break;
                             } else if (b.getHash().equals(hash)) {
@@ -172,10 +189,8 @@ public class BitcoindComparisonTool {
                     }
                     if (!found)
                         sendHeaders = headers;
-                    bitcoind.sendMessage(new HeadersMessage(PARAMS, sendHeaders));
-                    InventoryMessage i = new InventoryMessage(PARAMS);
-                    for (Block b : sendHeaders)
-                        i.addBlock(b);
+                    bitcoind.sendMessage(new HeadersMessage(sendHeaders));
+                    InventoryMessage i = InventoryMessage.ofBlocks(sendHeaders);
                     bitcoind.sendMessage(i);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
@@ -194,12 +209,11 @@ public class BitcoindComparisonTool {
         bitcoindChainHead = PARAMS.getGenesisBlock().getHash();
         
         // bitcoind MUST be on localhost or we will get banned as a DoSer
-        new NioClient(new InetSocketAddress(InetAddress.getLoopbackAddress(), args.length > 2 ? Integer.parseInt(args[2]) : PARAMS.getPort()), bitcoind, 1000);
+        new NioClient(new InetSocketAddress(InetAddress.getLoopbackAddress(), args.length > 2 ? Integer.parseInt(args[2]) : PARAMS.getPort()), bitcoind, Duration.ofSeconds(1));
 
         connectedFuture.get();
 
-        BlockLocator locator = new BlockLocator();
-        locator = locator.add(PARAMS.getGenesisBlock().getHash());
+        BlockLocator locator = new BlockLocator(Collections.singletonList(PARAMS.getGenesisBlock().getHash()));
         Sha256Hash hashTo = Sha256Hash.wrap("0000000000000000000000000000000000000000000000000000000000000000");
                 
         int rulesSinceFirstFail = 0;
@@ -215,7 +229,7 @@ public class BitcoindComparisonTool {
                     try {
                         Block b = blocks.next();
                         Block oldBlockWithSameHash = preloadedBlocks.put(b.getHash(), b);
-                        if (oldBlockWithSameHash != null && oldBlockWithSameHash.getTransactions().size() != b.getTransactions().size())
+                        if (oldBlockWithSameHash != null && oldBlockWithSameHash.transactionCount() != b.transactionCount())
                             blocksRequested.remove(b.getHash());
                         nextBlock = preloadedBlocks.get(block.blockHash);
                     } catch (NoSuchElementException e) {
@@ -257,8 +271,7 @@ public class BitcoindComparisonTool {
                 boolean shouldntRequest = blocksRequested.contains(nextBlock.getHash());
                 if (shouldntRequest)
                     blocksRequested.remove(nextBlock.getHash());
-                InventoryMessage message = new InventoryMessage(PARAMS);
-                message.addBlock(nextBlock);
+                InventoryMessage message = InventoryMessage.ofBlocks(nextBlock);
                 bitcoind.sendMessage(message);
                 log.info("Sent inv with block " + nextBlock.getHashAsString());
                 if (blocksPendingSend.contains(nextBlock.getHash())) {
@@ -287,10 +300,9 @@ public class BitcoindComparisonTool {
                 if (block.throwsException)
                     blocksRequested.remove(nextBlock.getHash());
                 //bitcoind.sendMessage(nextBlock);
-                locator = new BlockLocator();
-                locator = locator.add(bitcoindChainHead);
-                bitcoind.sendMessage(new GetHeadersMessage(PARAMS, locator, hashTo));
-                bitcoind.ping().get();
+                locator = new BlockLocator(Collections.singletonList(bitcoindChainHead));
+                bitcoind.sendMessage(new GetHeadersMessage(PARAMS.getSerializer().getProtocolVersion(), locator, hashTo));
+                bitcoind.sendPing().get();
                 if (!chain.getChainHead().getHeader().getHash().equals(bitcoindChainHead)) {
                     rulesSinceFirstFail++;
                     log.error("ERROR: bitcoind and bitcoinj acceptance differs on block \"" + block.ruleName + "\"");
@@ -301,7 +313,7 @@ public class BitcoindComparisonTool {
             } else if (rule instanceof MemoryPoolState) {
                 MemoryPoolMessage message = new MemoryPoolMessage();
                 bitcoind.sendMessage(message);
-                bitcoind.ping().get();
+                bitcoind.sendPing().get();
                 if (mostRecentInv == null && !((MemoryPoolState) rule).mempool.isEmpty()) {
                     log.error("ERROR: bitcoind had an empty mempool, but we expected some transactions on rule " + rule.ruleName);
                     rulesSinceFirstFail++;

@@ -17,26 +17,29 @@
 
 package org.bitcoinj.params;
 
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Difficulty;
 import org.bitcoinj.core.Block;
-import org.bitcoinj.core.Sha256Hash;
-import org.bitcoinj.core.Utils;
+import org.bitcoinj.base.Sha256Hash;
+import org.jspecify.annotations.Nullable;
 
-import static com.google.common.base.Preconditions.checkState;
+import java.time.Instant;
+
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * Network parameters for the regression test mode of bitcoind in which all blocks are trivially solvable.
  */
-public class RegTestParams extends AbstractBitcoinNetParams {
-    private static final long GENESIS_TIME = 1296688602;
+public class RegTestParams extends BitcoinNetworkParams {
+    private static final Instant GENESIS_TIME = Instant.ofEpochSecond(1296688602);
     private static final long GENESIS_NONCE = 2;
     private static final Sha256Hash GENESIS_HASH = Sha256Hash.wrap("0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206");
 
     public RegTestParams() {
-        super();
-        id = ID_REGTEST;
-        
+        super(BitcoinNetwork.REGTEST);
+
         targetTimespan = TARGET_TIMESPAN;
-        maxTarget = Utils.decodeCompactBits(Block.EASIEST_DIFFICULTY_TARGET);
+        maxTarget = Difficulty.EASIEST_DIFFICULTY_TARGET;
         // Difficulty adjustments are disabled for regtest.
         // By setting the block interval for difficulty adjustments to Integer.MAX_VALUE we make sure difficulty never
         // changes.
@@ -44,11 +47,8 @@ public class RegTestParams extends AbstractBitcoinNetParams {
         subsidyDecreaseBlockCount = 150;
 
         port = 18444;
-        packetMagic = 0xfabfb5daL;
+        packetMagic = 0xfabfb5da;
         dumpedPrivateKeyHeader = 239;
-        addressHeader = 111;
-        p2shHeader = 196;
-        segwitAddressHrp = "bcrt";
         spendableCoinbaseDepth = 100;
         bip32HeaderP2PKHpub = 0x043587cf; // The 4 byte header that serializes in base58 to "tpub".
         bip32HeaderP2PKHpriv = 0x04358394; // The 4 byte header that serializes in base58 to "tprv"
@@ -68,7 +68,7 @@ public class RegTestParams extends AbstractBitcoinNetParams {
         return true;
     }
 
-    private static RegTestParams instance;
+    @Nullable private static RegTestParams instance;
     public static synchronized RegTestParams get() {
         if (instance == null) {
             instance = new RegTestParams();
@@ -80,18 +80,11 @@ public class RegTestParams extends AbstractBitcoinNetParams {
     public Block getGenesisBlock() {
         synchronized (GENESIS_HASH) {
             if (genesisBlock == null) {
-                genesisBlock = Block.createGenesis(this);
-                genesisBlock.setDifficultyTarget(Block.EASIEST_DIFFICULTY_TARGET);
-                genesisBlock.setTime(GENESIS_TIME);
-                genesisBlock.setNonce(GENESIS_NONCE);
-                checkState(genesisBlock.getHash().equals(GENESIS_HASH), "Invalid genesis hash");
+                genesisBlock = Block.createGenesis(GENESIS_TIME, Difficulty.EASIEST_DIFFICULTY_TARGET, GENESIS_NONCE);
+                checkState(genesisBlock.getHash().equals(GENESIS_HASH), () ->
+                        "invalid genesis hash");
             }
         }
         return genesisBlock;
-    }
-
-    @Override
-    public String getPaymentProtocolId() {
-        return PAYMENT_PROTOCOL_ID_REGTEST;
     }
 }

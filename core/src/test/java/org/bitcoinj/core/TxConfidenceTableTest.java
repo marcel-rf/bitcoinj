@@ -16,14 +16,22 @@
 
 package org.bitcoinj.core;
 
-import org.bitcoinj.params.*;
-import org.bitcoinj.testing.*;
-import org.bitcoinj.utils.*;
-import org.junit.*;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.crypto.ECKey;
+import org.bitcoinj.params.TestNet3Params;
+import org.bitcoinj.testing.FakeTxBuilder;
+import org.bitcoinj.utils.BriefLogFormatter;
+import org.bitcoinj.utils.Threading;
+import org.junit.Before;
+import org.junit.Test;
 
-import java.net.*;
+import java.net.InetAddress;
+import java.nio.ByteBuffer;
 
-import static org.bitcoinj.core.Coin.COIN;
+import static org.bitcoinj.base.Coin.COIN;
 import static org.easymock.EasyMock.anyObject;
 import static org.easymock.EasyMock.createMock;
 import static org.easymock.EasyMock.expect;
@@ -34,7 +42,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
 public class TxConfidenceTableTest {
-    private static final NetworkParameters UNITTEST = UnitTestParams.get();
+    private static final NetworkParameters TESTNET = TestNet3Params.get();
     private Transaction tx1, tx2;
     private PeerAddress address1, address2, address3;
     private TxConfidenceTable table;
@@ -42,24 +50,25 @@ public class TxConfidenceTableTest {
     @Before
     public void setup() throws Exception {
         BriefLogFormatter.init();
-        Context context = new Context(UNITTEST);
+        Context context = new Context();
+        Context.propagate(context);
         table = context.getConfidenceTable();
 
-        Address to = LegacyAddress.fromKey(UNITTEST, new ECKey());
-        Address change = LegacyAddress.fromKey(UNITTEST, new ECKey());
+        Address to = ECKey.random().toAddress(ScriptType.P2PKH, BitcoinNetwork.TESTNET);
+        Address change = ECKey.random().toAddress(ScriptType.P2PKH, BitcoinNetwork.TESTNET);
 
-        tx1 = FakeTxBuilder.createFakeTxWithChangeAddress(UNITTEST, COIN, to, change);
-        tx2 = FakeTxBuilder.createFakeTxWithChangeAddress(UNITTEST, COIN, to, change);
+        tx1 = FakeTxBuilder.createFakeTxWithChangeAddress(COIN, to, change);
+        tx2 = FakeTxBuilder.createFakeTxWithChangeAddress(COIN, to, change);
         assertEquals(tx1.getTxId(), tx2.getTxId());
 
-        address1 = new PeerAddress(UNITTEST, InetAddress.getByAddress(new byte[] { 127, 0, 0, 1 }));
-        address2 = new PeerAddress(UNITTEST, InetAddress.getByAddress(new byte[] { 127, 0, 0, 2 }));
-        address3 = new PeerAddress(UNITTEST, InetAddress.getByAddress(new byte[] { 127, 0, 0, 3 }));
+        address1 = PeerAddress.simple(InetAddress.getByAddress(new byte[] { 127, 0, 0, 1 }), TESTNET.getPort());
+        address2 = PeerAddress.simple(InetAddress.getByAddress(new byte[] { 127, 0, 0, 2 }), TESTNET.getPort());
+        address3 = PeerAddress.simple(InetAddress.getByAddress(new byte[] { 127, 0, 0, 3 }), TESTNET.getPort());
     }
 
     @Test
-    public void pinHandlers() throws Exception {
-        Transaction tx = UNITTEST.getDefaultSerializer().makeTransaction(tx1.bitcoinSerialize());
+    public void pinHandlers() {
+        Transaction tx = TESTNET.getDefaultSerializer().makeTransaction(ByteBuffer.wrap(tx1.serialize()));
         Sha256Hash hash = tx.getTxId();
         table.seen(hash, address1);
         assertEquals(1, tx.getConfidence().numBroadcastPeers());
@@ -72,7 +81,7 @@ public class TxConfidenceTableTest {
     }
 
     @Test
-    public void events() throws Exception {
+    public void events() {
         final TransactionConfidence.Listener.ChangeReason[] run = new TransactionConfidence.Listener.ChangeReason[1];
         tx1.getConfidence().addEventListener(Threading.SAME_THREAD, (confidence, reason) -> run[0] = reason);
         table.seen(tx1.getTxId(), address1);
@@ -117,7 +126,7 @@ public class TxConfidenceTableTest {
     }
 
     @Test
-    public void invAndDownload() throws Exception {
+    public void invAndDownload() {
         // Base case: we see a transaction announced twice and then download it. The count is in the confidence object.
         assertEquals(0, table.numBroadcastPeers(tx1.getTxId()));
         table.seen(tx1.getTxId(), address1);

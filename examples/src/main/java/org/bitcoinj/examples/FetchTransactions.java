@@ -17,13 +17,19 @@
 
 package org.bitcoinj.examples;
 
-import org.bitcoinj.core.*;
-import org.bitcoinj.params.TestNet3Params;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.core.BlockChain;
+import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.core.Peer;
+import org.bitcoinj.core.PeerAddress;
+import org.bitcoinj.core.PeerGroup;
+import org.bitcoinj.core.Transaction;
 import org.bitcoinj.store.BlockStore;
 import org.bitcoinj.store.MemoryBlockStore;
 import org.bitcoinj.utils.BriefLogFormatter;
 
-import java.net.InetAddress;
 import java.util.List;
 import java.util.concurrent.Future;
 
@@ -34,13 +40,14 @@ public class FetchTransactions {
     public static void main(String[] args) throws Exception {
         BriefLogFormatter.init();
         System.out.println("Connecting to node");
-        final NetworkParameters params = TestNet3Params.get();
+        final Network network = BitcoinNetwork.TESTNET;
+        final NetworkParameters params = NetworkParameters.of(network);
 
-        BlockStore blockStore = new MemoryBlockStore(params);
-        BlockChain chain = new BlockChain(params, blockStore);
-        PeerGroup peerGroup = new PeerGroup(params, chain);
+        BlockStore blockStore = new MemoryBlockStore(params.getGenesisBlock());
+        BlockChain chain = new BlockChain(network, blockStore);
+        PeerGroup peerGroup = new PeerGroup(network, chain);
         peerGroup.start();
-        peerGroup.addAddress(new PeerAddress(params, InetAddress.getLocalHost()));
+        peerGroup.addAddress(PeerAddress.localhost(params));
         peerGroup.waitForPeers(1).get();
         Peer peer = peerGroup.getConnectedPeers().get(0);
 

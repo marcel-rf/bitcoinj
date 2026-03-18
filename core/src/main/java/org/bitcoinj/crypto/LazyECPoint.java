@@ -16,31 +16,30 @@
 
 package org.bitcoinj.crypto;
 
-import org.bitcoinj.core.ECKey;
+import org.bitcoinj.crypto.secp.Secp256k1Constants;
 import org.bouncycastle.math.ec.ECCurve;
-import org.bouncycastle.math.ec.ECFieldElement;
 import org.bouncycastle.math.ec.ECPoint;
 
-import javax.annotation.Nullable;
-import java.math.BigInteger;
+import org.jspecify.annotations.Nullable;
+import java.security.interfaces.ECPublicKey;
 import java.util.Arrays;
-
-import static com.google.common.base.Preconditions.checkNotNull;
+import java.util.Objects;
 
 /**
- * A wrapper around ECPoint that delays decoding of the point for as long as possible. This is useful because point
- * encode/decode in Bouncy Castle is quite slow especially on Dalvik, as it often involves decompression/recompression.
+ * A wrapper around a SECP256K1 ECPoint that delays decoding of the point for as long as possible. This is useful
+ * because point encode/decode in Bouncy Castle is quite slow especially on Dalvik, as it often involves
+ * decompression/recompression.
+ * <p>
+ * Apart from the lazy field {@link #point}, instances of this class are immutable.
  */
-public class LazyECPoint {
-    // If curve is set, bits is also set. If curve is unset, point is set and bits is unset. Point can be set along
-    // with curve and bits when the cached form has been accessed and thus must have been converted.
+public final class LazyECPoint implements ECPublicKey {
+    private static final ECCurve curve = ECKey.CURVE.getCurve();
 
-    private final ECCurve curve;
-    private final byte[] bits;
+    // bits will be null if LazyECPoint is constructed from an (already decoded) point
+    private final byte @Nullable [] bits;
     private final boolean compressed;
 
-    // This field is effectively final - once set it won't change again. However it can be set after
-    // construction.
+    // This field is lazy - once set it won't change again. However, it can be set after construction.
     @Nullable
     private ECPoint point;
 
@@ -48,11 +47,9 @@ public class LazyECPoint {
      * Construct a LazyECPoint from a public key. Due to the delayed decoding of the point the validation of the
      * public key is delayed too, e.g. until a getter is called.
      *
-     * @param curve a curve the point is on
      * @param bits  public key bytes
      */
-    public LazyECPoint(ECCurve curve, byte[] bits) {
-        this.curve = curve;
+    public LazyECPoint(byte[] bits) {
         this.bits = bits;
         this.compressed = ECKey.isPubKeyCompressed(bits);
     }
@@ -64,10 +61,24 @@ public class LazyECPoint {
      * @param compressed true if the represented public key is compressed
      */
     public LazyECPoint(ECPoint point, boolean compressed) {
-        this.point = checkNotNull(point).normalize();
+        this.point = Objects.requireNonNull(point).normalize();
         this.compressed = compressed;
-        this.curve = null;
         this.bits = null;
+    }
+
+    /**
+     * Construct a LazyECPoint from a Java ECPoint.
+     *
+     * @param point the wrapped point
+     */
+    LazyECPoint(java.security.spec.ECPoint point) {
+        this(toBouncy(point), true);
+    }
+
+    private static org.bouncycastle.math.ec.ECPoint toBouncy(java.security.spec.ECPoint point) {
+        return point == java.security.spec.ECPoint.POINT_INFINITY
+                ? curve.getInfinity()
+                : curve.createPoint(point.getAffineX(), point.getAffineY());
     }
 
     /**
@@ -92,6 +103,45 @@ public class LazyECPoint {
         return point;
     }
 
+    /**
+     * @return string representing the algorithm used with this key
+     */
+    @Override
+    public String getAlgorithm() {
+        return "Secp256k1";
+    }
+
+    /**
+     * @return string representing encoded format of this key
+     */
+    @Override
+    public String getFormat() {
+        return "SEC";
+    }
+
+    /**
+     * Convert from internal Bouncy Castle {@link ECPoint} to return
+     * a {@code java.security.spec.ECPoint}.
+     * @return Java Cryptography ECPoint instance
+     */
+    @Override
+    public java.security.spec.ECPoint getW() {
+        ECPoint bcPoint = get();
+        return bcPoint.isInfinity()
+                ? java.security.spec.ECPoint.POINT_INFINITY
+                : new java.security.spec.ECPoint(
+                    bcPoint.normalize().getAffineXCoord().toBigInteger(),
+                    bcPoint.normalize().getAffineYCoord().toBigInteger());
+    }
+
+    /**
+     * @return Java Cryptography type with Elliptic Curve parameters
+     */
+    @Override
+    public java.security.spec.ECParameterSpec getParams() {
+        return Secp256k1Constants.EC_PARAMS;
+    }
+
     public byte[] getEncoded() {
         if (bits != null)
             return Arrays.copyOf(bits, bits.length);
@@ -99,117 +149,17 @@ public class LazyECPoint {
             return get().getEncoded(compressed);
     }
 
-    // Delegated methods.
-
-    public ECPoint getDetachedPoint() {
-        return get().getDetachedPoint();
-    }
-
-    public boolean isInfinity() {
-        return get().isInfinity();
-    }
-
-    public ECPoint timesPow2(int e) {
-        return get().timesPow2(e);
-    }
-
-    public ECFieldElement getYCoord() {
-        return get().getYCoord();
-    }
-
-    public ECFieldElement[] getZCoords() {
-        return get().getZCoords();
-    }
-
-    public boolean isNormalized() {
-        return get().isNormalized();
-    }
-
-    public boolean isCompressed() {
+    // package-private
+    boolean isCompressedInternal() {
         return compressed;
     }
 
-    public ECPoint multiply(BigInteger k) {
-        return get().multiply(k);
-    }
-
-    public ECPoint subtract(ECPoint b) {
-        return get().subtract(b);
-    }
-
-    public boolean isValid() {
-        return get().isValid();
-    }
-
-    public ECPoint scaleY(ECFieldElement scale) {
-        return get().scaleY(scale);
-    }
-
-    public ECFieldElement getXCoord() {
-        return get().getXCoord();
-    }
-
-    public ECPoint scaleX(ECFieldElement scale) {
-        return get().scaleX(scale);
-    }
-
-    public boolean equals(ECPoint other) {
-        return get().equals(other);
-    }
-
-    public ECPoint negate() {
-        return get().negate();
-    }
-
-    public ECPoint threeTimes() {
-        return get().threeTimes();
-    }
-
-    public ECFieldElement getZCoord(int index) {
-        return get().getZCoord(index);
-    }
-
-    public byte[] getEncoded(boolean compressed) {
-        if (compressed == isCompressed() && bits != null)
+    // package-private
+    byte[] getEncodedInternal(boolean compressed) {
+        if (compressed == isCompressedInternal() && bits != null)
             return Arrays.copyOf(bits, bits.length);
         else
             return get().getEncoded(compressed);
-    }
-
-    public ECPoint add(ECPoint b) {
-        return get().add(b);
-    }
-
-    public ECPoint twicePlus(ECPoint b) {
-        return get().twicePlus(b);
-    }
-
-    public ECCurve getCurve() {
-        return get().getCurve();
-    }
-
-    public ECPoint normalize() {
-        return get().normalize();
-    }
-
-    public ECFieldElement getY() {
-        return this.normalize().getYCoord();
-    }
-
-    public ECPoint twice() {
-        return get().twice();
-    }
-
-    public ECFieldElement getAffineYCoord() {
-        return get().getAffineYCoord();
-    }
-
-    public ECFieldElement getAffineXCoord() {
-        return get().getAffineXCoord();
-    }
-
-    public ECFieldElement getX() {
-        return this.normalize().getXCoord();
     }
 
     @Override
@@ -225,6 +175,6 @@ public class LazyECPoint {
     }
 
     private byte[] getCanonicalEncoding() {
-        return getEncoded(true);
+        return getEncodedInternal(true);
     }
 }

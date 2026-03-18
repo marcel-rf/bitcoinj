@@ -17,7 +17,8 @@
 
 package org.bitcoinj.signers;
 
-import org.bitcoinj.core.ECKey;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.crypto.ECKey;
 import org.bitcoinj.core.TransactionInput;
 import org.bitcoinj.core.TransactionWitness;
 import org.bitcoinj.crypto.TransactionSignature;
@@ -73,22 +74,22 @@ public class MissingSigResolutionSigner implements TransactionSigner {
             if (ScriptPattern.isP2SH(scriptPubKey) || ScriptPattern.isSentToMultisig(scriptPubKey)) {
                 int sigSuffixCount = ScriptPattern.isP2SH(scriptPubKey) ? 1 : 0;
                 // all chunks except the first one (OP_0) and the last (redeem script) are signatures
-                for (int j = 1; j < inputScript.getChunks().size() - sigSuffixCount; j++) {
-                    ScriptChunk scriptChunk = inputScript.getChunks().get(j);
+                for (int j = 1; j < inputScript.chunks().size() - sigSuffixCount; j++) {
+                    ScriptChunk scriptChunk = inputScript.chunks().get(j);
                     if (scriptChunk.equalsOpCode(0)) {
                         if (missingSigsMode == Wallet.MissingSigsMode.THROW) {
                             throw new MissingSignatureException();
                         } else if (missingSigsMode == Wallet.MissingSigsMode.USE_DUMMY_SIG) {
-                            txIn.setScriptSig(scriptPubKey.getScriptSigWithSignature(inputScript, dummySig, j - 1));
+                            txIn = txIn.withScriptSig(scriptPubKey.getScriptSigWithSignature(inputScript, dummySig, j - 1));
                         }
                     }
                 }
             } else if (ScriptPattern.isP2PK(scriptPubKey) || ScriptPattern.isP2PKH(scriptPubKey)) {
-                if (inputScript.getChunks().get(0).equalsOpCode(0)) {
+                if (inputScript.chunks().get(0).equalsOpCode(0)) {
                     if (missingSigsMode == Wallet.MissingSigsMode.THROW) {
                         throw new ECKey.MissingPrivateKeyException();
                     } else if (missingSigsMode == Wallet.MissingSigsMode.USE_DUMMY_SIG) {
-                        txIn.setScriptSig(scriptPubKey.getScriptSigWithSignature(inputScript, dummySig, 0));
+                        txIn = txIn.withScriptSig(scriptPubKey.getScriptSigWithSignature(inputScript, dummySig, 0));
                     }
                 }
             } else if (ScriptPattern.isP2WPKH(scriptPubKey)) {
@@ -98,13 +99,14 @@ public class MissingSigResolutionSigner implements TransactionSigner {
                         throw new ECKey.MissingPrivateKeyException();
                     } else if (missingSigsMode == Wallet.MissingSigsMode.USE_DUMMY_SIG) {
                         ECKey key = keyBag.findKeyFromPubKeyHash(
-                                ScriptPattern.extractHashFromP2WH(scriptPubKey), Script.ScriptType.P2WPKH);
-                        txIn.setWitness(TransactionWitness.redeemP2WPKH(TransactionSignature.dummy(), key));
+                                ScriptPattern.extractHashFromP2WH(scriptPubKey), ScriptType.P2WPKH);
+                        txIn = txIn.withWitness(TransactionWitness.redeemP2WPKH(TransactionSignature.dummy(), key));
                     }
                 }
             } else {
                 throw new IllegalStateException("cannot handle: " + scriptPubKey);
             }
+            propTx.partialTx.replaceInput(i, txIn);
         }
         return true;
     }

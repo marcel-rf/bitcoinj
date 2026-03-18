@@ -1,10 +1,44 @@
-image: debian:bullseye-slim
-
-before_script:
-  - apt-get update
-  - apt-get -y upgrade
-  - apt-get -y install openjdk-11-jdk gradle
-
-build:
+reference:
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update
+    - apt-get -y install ca-certificates buildah
+    # switch to iptables legacy, as GitLab CI doesn't support nftables
+    - apt-get -y install --no-install-recommends iptables
+    - update-alternatives --set iptables /usr/sbin/iptables-legacy
   script:
-    - gradle build --stacktrace
+    - buildah build --file build.Containerfile --output build .
+  after_script:
+    - sha256sum build/core/* build/wallettool/bin/*  build/wallettool/lib/*
+  artifacts:
+    name: bitcoinj-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+    paths:
+      - build/**
+
+bookworm-jdk17:
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update
+    - apt-get -y install openjdk-17-jdk-headless gradle
+  script:
+    - gradle --settings-file settings-debian.gradle build publishToMavenLocal installDist --init-script build-scan-agree.gradle --scan --stacktrace
+  after_script:
+    - gradle --version
+    - sha256sum core/build/libs/*.jar wallettool/build/install/wallet-tool/bin/*  wallettool/build/install/wallet-tool/lib/*.jar
+
+trixie-jdk21:
+  image: debian:trixie-slim
+  before_script:
+    - apt-get update
+    - apt-get -y install openjdk-21-jdk-headless gradle
+  script:
+    - gradle --settings-file settings-debian.gradle build publishToMavenLocal installDist --init-script build-scan-agree.gradle --scan --stacktrace
+  after_script:
+    - gradle --version
+    - sha256sum core/build/libs/*.jar wallettool/build/install/wallet-tool/bin/*  wallettool/build/install/wallet-tool/lib/*.jar
+
+sast:
+  stage: test
+
+include:
+  - template: Security/SAST.gitlab-ci.yml

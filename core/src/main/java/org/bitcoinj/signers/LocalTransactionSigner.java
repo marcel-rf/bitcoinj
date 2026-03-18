@@ -17,11 +17,8 @@
 
 package org.bitcoinj.signers;
 
-import java.util.EnumSet;
-
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.LegacyAddress;
+import org.bitcoinj.base.Coin;
+import org.bitcoinj.crypto.ECKey;
 import org.bitcoinj.core.Transaction;
 import org.bitcoinj.core.TransactionInput;
 import org.bitcoinj.core.TransactionOutput;
@@ -31,12 +28,14 @@ import org.bitcoinj.crypto.TransactionSignature;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
 import org.bitcoinj.script.ScriptException;
+import org.bitcoinj.script.ScriptExecution;
 import org.bitcoinj.script.ScriptPattern;
-import org.bitcoinj.script.Script.VerifyFlag;
 import org.bitcoinj.wallet.KeyBag;
 import org.bitcoinj.wallet.RedeemData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.EnumSet;
 
 /**
  * <p>{@link TransactionSigner} implementation for signing inputs using keys from provided {@link KeyBag}.</p>
@@ -57,8 +56,8 @@ public class LocalTransactionSigner implements TransactionSigner {
      * Verify flags that are safe to use when testing if an input is already
      * signed.
      */
-    private static final EnumSet<VerifyFlag> MINIMUM_VERIFY_FLAGS = EnumSet.of(VerifyFlag.P2SH,
-        VerifyFlag.NULLDUMMY);
+    private static final EnumSet<ScriptExecution.VerifyFlag> MINIMUM_VERIFY_FLAGS = EnumSet.of(ScriptExecution.VerifyFlag.P2SH,
+        ScriptExecution.VerifyFlag.NULLDUMMY);
 
     @Override
     public boolean isReady() {
@@ -82,7 +81,7 @@ public class LocalTransactionSigner implements TransactionSigner {
                 // We assume if its already signed, its hopefully got a SIGHASH type that will not invalidate when
                 // we sign missing pieces (to check this would require either assuming any signatures are signing
                 // standard output types or a way to get processed signatures out of script execution)
-                txIn.getScriptSig().correctlySpends(tx, i, txIn.getWitness(), connectedOutput.getValue(),
+                ScriptExecution.correctlySpends(txIn.getScriptSig(), tx, i, txIn.getWitness(), connectedOutput.getValue(),
                         connectedOutput.getScriptPubKey(), MINIMUM_VERIFY_FLAGS);
                 log.warn("Input {} already correctly spends output, assuming SIGHASH type used will be safe and skipping signing.", i);
                 continue;
@@ -99,11 +98,11 @@ public class LocalTransactionSigner implements TransactionSigner {
             if (pubKey instanceof DeterministicKey)
                 propTx.keyPaths.put(scriptPubKey, (((DeterministicKey) pubKey).getPath()));
 
-            ECKey key;
             // locate private key in redeem data. For P2PKH and P2PK inputs RedeemData will always contain
             // only one key (with private bytes). For P2SH inputs RedeemData will contain multiple keys, one of which MAY
             // have private bytes
-            if ((key = redeemData.getFullKey()) == null) {
+            ECKey key = redeemData.getFullKey();
+            if (key == null) {
                 log.warn("No local key found for input {}", i);
                 continue;
             }
@@ -111,7 +110,7 @@ public class LocalTransactionSigner implements TransactionSigner {
             Script inputScript = txIn.getScriptSig();
             // script here would be either a standard CHECKSIG program for P2PKH or P2PK inputs or
             // a CHECKMULTISIG program for P2SH inputs
-            byte[] script = redeemData.redeemScript.getProgram();
+            byte[] script = redeemData.redeemScript.program();
             try {
                 if (ScriptPattern.isP2PK(scriptPubKey) || ScriptPattern.isP2PKH(scriptPubKey)
                         || ScriptPattern.isP2SH(scriptPubKey)) {
@@ -128,24 +127,24 @@ public class LocalTransactionSigner implements TransactionSigner {
                     int sigIndex = 0;
                     inputScript = scriptPubKey.getScriptSigWithSignature(inputScript, signature.encodeToBitcoin(),
                             sigIndex);
-                    txIn.setScriptSig(inputScript);
-                    txIn.setWitness(null);
+                    txIn = txIn.withScriptSig(inputScript);
+                    txIn = txIn.withoutWitness();
                 } else if (ScriptPattern.isP2WPKH(scriptPubKey)) {
                     Script scriptCode = ScriptBuilder.createP2PKHOutputScript(key);
                     Coin value = txIn.getValue();
                     TransactionSignature signature = tx.calculateWitnessSignature(i, key, scriptCode, value,
                             Transaction.SigHash.ALL, false);
-                    txIn.setScriptSig(ScriptBuilder.createEmpty());
-                    txIn.setWitness(TransactionWitness.redeemP2WPKH(signature, key));
+                    txIn = txIn.withScriptSig(ScriptBuilder.createEmpty());
+                    txIn = txIn.withWitness(TransactionWitness.redeemP2WPKH(signature, key));
                 } else {
-                    throw new IllegalStateException(script.toString());
+                    throw new IllegalStateException("Unsupported scriptPubKey: " + scriptPubKey);
                 }
             } catch (ECKey.KeyIsEncryptedException e) {
                 throw e;
             } catch (ECKey.MissingPrivateKeyException e) {
                 log.warn("No private key in keypair for input {}", i);
             }
-
+            tx.replaceInput(i, txIn);
         }
         return true;
     }

@@ -17,9 +17,11 @@
 package org.bitcoinj.wallet;
 
 import org.bitcoinj.core.BloomFilter;
-import org.bitcoinj.core.ECKey;
+import org.bitcoinj.crypto.ECKey;
 import org.bitcoinj.wallet.listeners.KeyChainEventListener;
+import org.bitcoinj.protobuf.wallet.Protos;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.Executor;
 
@@ -51,7 +53,10 @@ public interface KeyChain {
     /** Obtains a key intended for the given purpose. The chain may create a new key, derive one, or re-use an old one. */
     ECKey getKey(KeyPurpose purpose);
 
-    /** Returns a list of keys serialized to the bitcoinj protobuf format. */
+    /**
+     * Return a list of keys serialized to the bitcoinj protobuf format.
+     * @return list of keys (treat as unmodifiable list)
+     */
     List<Protos.Key> serializeToProtobuf();
 
     /** Adds a listener for events that are run when keys are added, on the user thread. */
@@ -68,16 +73,24 @@ public interface KeyChain {
 
     /**
      * Returns the number of elements this chain wishes to insert into the Bloom filter. The size passed to
-     * {@link #getFilter(int, double, long)} should be at least this large.
+     * {@link #getFilter(int, double, int)} should be at least this large.
      */
     int numBloomFilterEntries();
 
     /**
-     * <p>Returns the earliest creation time of keys in this chain, in seconds since the epoch. This can return zero
-     * if at least one key does not have that data (was created before key timestamping was implemented). If there
-     * are no keys in the wallet, {@link Long#MAX_VALUE} is returned.</p>
+     * Returns the earliest creation time of keys in this chain.
+     * @return earliest creation times of keys in this chain,
+     *         {@link Instant#EPOCH} if at least one time is unknown,
+     *         {@link Instant#MAX} if no keys in this chain
      */
-    long getEarliestKeyCreationTime();
+    Instant earliestKeyCreationTime();
+
+    /** @deprecated use {@link #earliestKeyCreationTime()} */
+    @Deprecated
+    default long getEarliestKeyCreationTime() {
+        Instant earliestKeyCreationTime = earliestKeyCreationTime();
+        return earliestKeyCreationTime.equals(Instant.MAX) ? Long.MAX_VALUE : earliestKeyCreationTime.getEpochSecond();
+    }
 
     /**
      * <p>Gets a bloom filter that contains all of the public keys from this chain, and which will provide the given
@@ -88,8 +101,8 @@ public interface KeyChain {
      * <p>This is used to generate a {@link BloomFilter} which can be {@link BloomFilter#merge(BloomFilter)}d with
      * another. It could also be used if you have a specific target for the filter's size.</p>
      *
-     * <p>See the docs for {@link BloomFilter#BloomFilter(int, double, long)} for a brief
+     * <p>See the docs for {@link BloomFilter#BloomFilter(int, double, int)} for a brief
      * explanation of anonymity when using bloom filters, and for the meaning of these parameters.</p>
      */
-    BloomFilter getFilter(int size, double falsePositiveRate, long tweak);
+    BloomFilter getFilter(int size, double falsePositiveRate, int tweak);
 }

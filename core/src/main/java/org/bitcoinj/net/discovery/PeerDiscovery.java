@@ -17,11 +17,12 @@
 
 package org.bitcoinj.net.discovery;
 
-import java.net.InetSocketAddress;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
+import org.bitcoinj.core.Services;
 import org.bitcoinj.core.VersionMessage;
+
+import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.util.List;
 
 /**
  * A PeerDiscovery object is responsible for finding addresses of other nodes in the Bitcoin P2P network. Note that
@@ -31,10 +32,12 @@ public interface PeerDiscovery {
     // TODO: Flesh out this interface a lot more.
 
     /**
-     * Queries the addresses. This method may block.
-     * @param services Required services as a bitmask, e.g. {@link VersionMessage#NODE_NETWORK}.
+     * Queries for addresses. This method may block.
+     * @param services required services as a bitmask, e.g. {@link Services#NODE_NETWORK}
+     * @param timeout query timeout
+     * @return found addresses
      */
-    List<InetSocketAddress> getPeers(long services, long timeoutValue, TimeUnit timeoutUnit) throws PeerDiscoveryException;
+    List<InetSocketAddress> getPeers(long services, Duration timeout) throws PeerDiscoveryException;
 
     /** Stops any discovery in progress when we want to shut down quickly. */
     void shutdown();

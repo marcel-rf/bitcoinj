@@ -17,15 +17,16 @@
 
 package org.bitcoinj.crypto;
 
+import org.junit.Before;
+import org.junit.Test;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.junit.Before;
-import org.junit.Test;
-
-import static org.bitcoinj.core.Utils.HEX;
-import static org.bitcoinj.core.Utils.WHITESPACE_SPLITTER;
+import org.bitcoinj.base.internal.ByteUtils;
+import static org.bitcoinj.base.internal.InternalUtils.WHITESPACE_SPLITTER;
+import static org.junit.Assert.assertEquals;
 
 /**
  * Test the various guard clauses of {@link MnemonicCode}.
@@ -41,9 +42,25 @@ public class MnemonicCodeTest {
         mc = new MnemonicCode();
     }
 
-    @Test(expected = MnemonicException.MnemonicLengthException.class)
+    @Test
+    public void testGetWordList() {
+        List<String> wordList = mc.getWordList();
+
+        assertEquals(2048, wordList.size());
+        assertEquals("abandon", wordList.get(0));
+        assertEquals("zoo", wordList.get(2047));
+    }
+
+    @Test(expected = UnsupportedOperationException.class)
+    public void testGetWordListUnmodifiable() {
+        List<String> wordList = mc.getWordList();
+
+        wordList.remove(0);
+    }
+
+    @Test(expected = RuntimeException.class)
     public void testBadEntropyLength() throws Exception {
-        byte[] entropy = HEX.decode("7f7f7f7f7f7f7f7f7f7f7f7f7f7f");
+        byte[] entropy = ByteUtils.parseHex("7f7f7f7f7f7f7f7f7f7f7f7f7f7f");
         mc.toMnemonic(entropy);
     }    
 
@@ -71,15 +88,9 @@ public class MnemonicCodeTest {
         mc.check(words);
     }
 
-    @Test(expected = MnemonicException.MnemonicLengthException.class)
+    @Test(expected = RuntimeException.class)
     public void testEmptyEntropy() throws Exception {
         byte[] entropy = {};
         mc.toMnemonic(entropy);
-    }
-
-    @Test(expected = NullPointerException.class)
-    public void testNullPassphrase() throws Exception {
-        List<String> code = WHITESPACE_SPLITTER.splitToList("legal winner thank year wave sausage worth useful legal winner thank yellow");
-        MnemonicCode.toSeed(code, null);
     }
 }

@@ -16,20 +16,23 @@
 
 package org.bitcoinj.core;
 
-import org.bitcoinj.utils.*;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.utils.Threading;
 
-import javax.annotation.*;
-import java.lang.ref.*;
-import java.util.*;
-import java.util.concurrent.locks.*;
-
-import static com.google.common.base.Preconditions.checkNotNull;
+import org.jspecify.annotations.Nullable;
+import java.lang.ref.Reference;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * <p>Tracks transactions that are being announced across the network. Typically one is created for you by a
  * {@link PeerGroup} and then given to each Peer to update. The current purpose is to let Peers update the confidence
  * (number of peers broadcasting). It helps address an attack scenario in which a malicious remote peer (or several)
- * feeds you invalid transactions, eg, ones that spend coins which don't exist. If you don't see most of the peers
+ * feeds you invalid transactions, e.g., ones that spend coins which don't exist. If you don't see most of the peers
  * announce the transaction within a reasonable time, it may be that the TX is not valid. Alternatively, an attacker
  * may control your entire internet connection: in this scenario counting broadcasting peers does not help you.</p>
  *
@@ -40,8 +43,8 @@ public class TxConfidenceTable {
     protected final ReentrantLock lock = Threading.lock(TxConfidenceTable.class);
 
     private static class WeakConfidenceReference extends WeakReference<TransactionConfidence> {
-        public Sha256Hash hash;
-        public WeakConfidenceReference(TransactionConfidence confidence, ReferenceQueue<TransactionConfidence> queue) {
+        final Sha256Hash hash;
+        WeakConfidenceReference(TransactionConfidence confidence, ReferenceQueue<TransactionConfidence> queue) {
             super(confidence, queue);
             hash = confidence.getTransactionHash();
         }
@@ -65,7 +68,7 @@ public class TxConfidenceTable {
      * @param size Max number of transactions to track. The table will fill up to this size then stop growing.
      */
     public TxConfidenceTable(final int size) {
-        this(size, new TransactionConfidence.Factory());
+        this(size, TransactionConfidence::new);
     }
 
     TxConfidenceTable(final int size, TransactionConfidence.Factory confidenceFactory){
@@ -87,6 +90,15 @@ public class TxConfidenceTable {
      */
     public TxConfidenceTable() {
         this(MAX_SIZE);
+    }
+
+    /**
+     * Get the confidence object for a transaction
+     * @param tx the transaction
+     * @return the corresponding confidence object
+     */
+    public TransactionConfidence getConfidence(Transaction tx) {
+        return tx.getConfidence(this);
     }
 
     /**
@@ -162,18 +174,13 @@ public class TxConfidenceTable {
      * is unknown to the system at this time.
      */
     public TransactionConfidence getOrCreate(Sha256Hash hash) {
-        checkNotNull(hash);
+        Objects.requireNonNull(hash);
         lock.lock();
         try {
-            WeakConfidenceReference reference = table.get(hash);
-            if (reference != null) {
-                TransactionConfidence confidence = reference.get();
-                if (confidence != null)
-                    return confidence;
-            }
-            TransactionConfidence newConfidence = confidenceFactory.createConfidence(hash);
-            table.put(hash, new WeakConfidenceReference(newConfidence, referenceQueue));
-            return newConfidence;
+            TransactionConfidence confidence = getConfidence(hash);
+            return (confidence != null)
+                    ? confidence
+                    : newConfidence(hash);
         } finally {
             lock.unlock();
         }
@@ -187,16 +194,23 @@ public class TxConfidenceTable {
     public TransactionConfidence get(Sha256Hash hash) {
         lock.lock();
         try {
-            WeakConfidenceReference ref = table.get(hash);
-            if (ref == null)
-                return null;
-            TransactionConfidence confidence = ref.get();
-            if (confidence != null)
-                return confidence;
-            else
-                return null;
+            return getConfidence(hash);
         } finally {
             lock.unlock();
         }
+    }
+
+    // Internal: assumes lock is in place
+    @Nullable
+    private TransactionConfidence getConfidence(Sha256Hash hash) {
+        WeakConfidenceReference ref = table.get(hash);
+        return (ref != null) ? ref.get() : null;
+    }
+
+    // Internal: assumes lock is in place
+    private TransactionConfidence newConfidence(Sha256Hash hash) {
+        TransactionConfidence newConfidence = confidenceFactory.createConfidence(hash);
+        table.put(hash, new WeakConfidenceReference(newConfidence, referenceQueue));
+        return newConfidence;
     }
 }

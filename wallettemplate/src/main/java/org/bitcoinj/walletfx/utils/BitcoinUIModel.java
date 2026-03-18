@@ -16,26 +16,26 @@
 
 package org.bitcoinj.walletfx.utils;
 
-import org.bitcoinj.core.Address;
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.core.listeners.DownloadProgressTracker;
-import org.bitcoinj.wallet.Wallet;
 import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyDoubleProperty;
 import javafx.beans.property.ReadOnlyObjectProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.beans.property.SimpleObjectProperty;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.Coin;
+import org.bitcoinj.core.listeners.DownloadProgressTracker;
+import org.bitcoinj.wallet.Wallet;
 
-import java.util.Date;
+import java.time.Instant;
 
 /**
  * A class that exposes relevant bitcoin stuff as JavaFX bindable properties.
  */
 public class BitcoinUIModel {
-    private SimpleObjectProperty<Address> address = new SimpleObjectProperty<>();
-    private SimpleObjectProperty<Coin> balance = new SimpleObjectProperty<>(Coin.ZERO);
-    private SimpleDoubleProperty syncProgress = new SimpleDoubleProperty(-1);
-    private ProgressBarUpdater syncProgressUpdater = new ProgressBarUpdater();
+    private final SimpleObjectProperty<Address> address = new SimpleObjectProperty<>();
+    private final SimpleObjectProperty<Coin> balance = new SimpleObjectProperty<>(Coin.ZERO);
+    private final SimpleDoubleProperty syncProgress = new SimpleDoubleProperty(-1);
+    private final ProgressBarUpdater syncProgressUpdater = new ProgressBarUpdater();
 
     public BitcoinUIModel() {
     }
@@ -61,8 +61,8 @@ public class BitcoinUIModel {
 
     private class ProgressBarUpdater extends DownloadProgressTracker {
         @Override
-        protected void progress(double pct, int blocksLeft, Date date) {
-            super.progress(pct, blocksLeft, date);
+        protected void progress(double pct, int blocksLeft, Instant time) {
+            super.progress(pct, blocksLeft, time);
             Platform.runLater(() -> syncProgress.set(pct / 100.0));
         }
 

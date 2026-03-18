@@ -16,8 +16,12 @@
 
 package org.bitcoinj.walletfx.utils;
 
-import com.google.common.base.Throwables;
-import javafx.animation.*;
+import javafx.animation.Animation;
+import javafx.animation.FadeTransition;
+import javafx.animation.KeyFrame;
+import javafx.animation.KeyValue;
+import javafx.animation.ScaleTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Node;
@@ -29,10 +33,12 @@ import javafx.stage.Stage;
 import javafx.util.Duration;
 
 import java.io.IOException;
+import java.net.URI;
 import java.net.URL;
+import java.util.Objects;
 import java.util.function.BiConsumer;
 
-import static com.google.common.base.Preconditions.checkState;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 import static org.bitcoinj.walletfx.utils.WTUtils.unchecked;
 
 public class GuiUtils {
@@ -57,7 +63,7 @@ public class GuiUtils {
 
     public static void crashAlert(Throwable t) {
         t.printStackTrace();
-        Throwable rootCause = Throwables.getRootCause(t);
+        Throwable rootCause = findRootCause(t);
         Runnable r = () -> {
             runAlert((stage, controller) -> controller.crashAlert(stage, rootCause.toString()));
             Platform.exit();
@@ -70,7 +76,7 @@ public class GuiUtils {
 
     /** Show a GUI alert box for any unhandled exceptions that propagate out of this thread. */
     public static void handleCrashesOnThisThread() {
-        Thread.currentThread().setUncaughtExceptionHandler((thread, exception) -> GuiUtils.crashAlert(Throwables.getRootCause(exception)));
+        Thread.currentThread().setUncaughtExceptionHandler((thread, exception) -> GuiUtils.crashAlert(findRootCause(exception)));
     }
 
     public static void informationalAlert(String message, String details, Object... args) {
@@ -82,8 +88,10 @@ public class GuiUtils {
             Platform.runLater(r);
     }
 
+    /** @deprecated Use {@link #UI_ANIMATION_TIME} */
+    @Deprecated
     public static final int UI_ANIMATION_TIME_MSEC = 600;
-    public static final Duration UI_ANIMATION_TIME = Duration.millis(UI_ANIMATION_TIME_MSEC);
+    public static final Duration UI_ANIMATION_TIME = Duration.millis(600);
 
     public static Animation fadeIn(Node ui) {
         return fadeIn(ui, 0);
@@ -91,7 +99,7 @@ public class GuiUtils {
 
     public static Animation fadeIn(Node ui, int delayMillis) {
         ui.setCache(true);
-        FadeTransition ft = new FadeTransition(Duration.millis(UI_ANIMATION_TIME_MSEC), ui);
+        FadeTransition ft = new FadeTransition(UI_ANIMATION_TIME, ui);
         ft.setFromValue(0.0);
         ft.setToValue(1.0);
         ft.setOnFinished(ev -> ui.setCache(false));
@@ -101,7 +109,7 @@ public class GuiUtils {
     }
 
     public static Animation fadeOut(Node ui) {
-        FadeTransition ft = new FadeTransition(Duration.millis(UI_ANIMATION_TIME_MSEC), ui);
+        FadeTransition ft = new FadeTransition(UI_ANIMATION_TIME, ui);
         ft.setFromValue(ui.getOpacity());
         ft.setToValue(0.0);
         ft.play();
@@ -129,7 +137,7 @@ public class GuiUtils {
         node.setEffect(blur);
         Timeline timeline = new Timeline();
         KeyValue kv = new KeyValue(blur.radiusProperty(), 10.0);
-        KeyFrame kf = new KeyFrame(Duration.millis(UI_ANIMATION_TIME_MSEC), kv);
+        KeyFrame kf = new KeyFrame(UI_ANIMATION_TIME, kv);
         timeline.getKeyFrames().add(kf);
         timeline.play();
     }
@@ -138,7 +146,7 @@ public class GuiUtils {
         GaussianBlur blur = (GaussianBlur) node.getEffect();
         Timeline timeline = new Timeline();
         KeyValue kv = new KeyValue(blur.radiusProperty(), 0.0);
-        KeyFrame kf = new KeyFrame(Duration.millis(UI_ANIMATION_TIME_MSEC), kv);
+        KeyFrame kf = new KeyFrame(UI_ANIMATION_TIME, kv);
         timeline.getKeyFrames().add(kf);
         timeline.setOnFinished(actionEvent -> node.setEffect(null));
         timeline.play();
@@ -157,7 +165,7 @@ public class GuiUtils {
     }
 
     private static ScaleTransition scaleFromTo(Node node, double from, double to, int delayMillis) {
-        ScaleTransition scale = new ScaleTransition(Duration.millis(UI_ANIMATION_TIME_MSEC / 2), node);
+        ScaleTransition scale = new ScaleTransition(UI_ANIMATION_TIME.divide(2), node);
         scale.setFromX(from);
         scale.setFromY(from);
         scale.setToX(to);
@@ -173,12 +181,20 @@ public class GuiUtils {
      */
     public static URL getResource(Class<?> clazz, String name) {
         if (false)
-            return unchecked(() -> new URL("file:///your/path/here/src/main/wallettemplate/" + name));
+            return unchecked(() -> URI.create("file:///your/path/here/src/main/wallettemplate/" + name).toURL());
         else
             return clazz.getResource(name);
     }
 
     public static void checkGuiThread() {
         checkState(Platform.isFxApplicationThread());
+    }
+
+    private static Throwable findRootCause(Throwable throwable) {
+        Throwable rootCause = Objects.requireNonNull(throwable);
+        while (rootCause.getCause() != null && rootCause.getCause() != rootCause) {
+            rootCause = rootCause.getCause();
+        }
+        return rootCause;
     }
 }

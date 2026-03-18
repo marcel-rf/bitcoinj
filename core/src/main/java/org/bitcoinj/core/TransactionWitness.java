@@ -1,4 +1,6 @@
 /*
+ * Copyright by the original author or authors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -14,90 +16,179 @@
 
 package org.bitcoinj.core;
 
-import static com.google.common.base.Preconditions.checkArgument;
-
-import java.io.IOException;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-
-import javax.annotation.Nullable;
-
+import org.bitcoinj.base.VarInt;
+import org.bitcoinj.base.internal.Buffers;
+import org.bitcoinj.base.internal.ByteUtils;
+import org.bitcoinj.base.internal.InternalUtils;
+import org.bitcoinj.crypto.ECKey;
 import org.bitcoinj.crypto.TransactionSignature;
 import org.bitcoinj.script.Script;
 
+import org.jspecify.annotations.Nullable;
+import java.nio.BufferOverflowException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+
+import static org.bitcoinj.base.internal.Preconditions.check;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
+
+/**
+ * This structure contains data required to check transaction validity but not required to determine transaction
+ * effects. It is described as a number of byte vectors called "pushes". Those vectors are pushed to the script stack
+ * before script execution when validating a transaction.
+ * <p>
+ * For example, for inputs spending a P2WPKH output the witness consists of a signature and a public key – the same
+ * data that would have been pushed to the stack via a scriptSig for P2PKH.
+ * <p>
+ * Instances of this class are immutable.
+ *
+ * @see <a href="https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki">BIP 141</a>
+ * @see <a href="https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki">BIP 143</a>
+ */
 public class TransactionWitness {
-    public static final TransactionWitness EMPTY = new TransactionWitness(0);
+    public static final TransactionWitness EMPTY = TransactionWitness.of(Collections.emptyList());
 
     /**
      * Creates the stack pushes necessary to redeem a P2WPKH output. If given signature is null, an empty push will be
      * used as a placeholder.
      */
     public static TransactionWitness redeemP2WPKH(@Nullable TransactionSignature signature, ECKey pubKey) {
-        checkArgument(pubKey.isCompressed(), "only compressed keys allowed");
-        TransactionWitness witness = new TransactionWitness(2);
-        witness.setPush(0, signature != null ? signature.encodeToBitcoin() : new byte[0]); // signature
-        witness.setPush(1, pubKey.getPubKey()); // pubkey
-        return witness;
+        checkArgument(pubKey.isCompressed(), () ->
+                "only compressed keys allowed");
+        List<byte[]> pushes = new ArrayList<>(2);
+        pushes.add(signature != null ? signature.encodeToBitcoin() : new byte[0]); // signature
+        pushes.add(pubKey.getPubKey()); // pubkey
+        return TransactionWitness.of(pushes);
     }
 
     /**
      * Creates the stack pushes necessary to redeem a P2WSH output.
      */
     public static TransactionWitness redeemP2WSH(Script witnessScript, TransactionSignature... signatures) {
-        TransactionWitness witness = new TransactionWitness(signatures.length + 2);
-        witness.setPush(0, new byte[]{});
-        int i;
-        for (i = 0; i < signatures.length; i++) {
-            witness.setPush(i + 1, signatures[i].encodeToBitcoin());
-        }
-        witness.setPush(i + 1, witnessScript.getProgram());
-        return witness;
+        List<byte[]> pushes = new ArrayList<>(signatures.length + 2);
+        pushes.add(new byte[] {});
+        for (TransactionSignature signature : signatures)
+            pushes.add(signature.encodeToBitcoin());
+        pushes.add(witnessScript.program());
+        return TransactionWitness.of(pushes);
+    }
+
+    /**
+     * Construct a transaction witness from a given list of arbitrary stack pushes.
+     *
+     * @param pushes list of pushes
+     * @return constructed transaction witness
+     */
+    public static TransactionWitness of(List<byte[]> pushes) {
+        return new TransactionWitness(pushes);
+    }
+
+    /**
+     * Construct a transaction witness from a given list of arbitrary stack pushes.
+     *
+     * @param pushes list of pushes
+     * @return constructed transaction witness
+     */
+    public static TransactionWitness of(byte[]... pushes) {
+        return of(Arrays.asList(pushes));
+    }
+
+    /**
+     * Deserialize this transaction witness from a given payload.
+     *
+     * @param payload           payload to deserialize from
+     * @return read message
+     * @throws BufferUnderflowException if the read message extends beyond the remaining bytes of the payload
+     */
+    public static TransactionWitness read(ByteBuffer payload) throws BufferUnderflowException {
+        VarInt pushCountVarInt = VarInt.read(payload);
+        check(pushCountVarInt.fitsInt(), BufferUnderflowException::new);
+        int pushCount = pushCountVarInt.intValue();
+        List<byte[]> pushes = new ArrayList<>(Math.min(pushCount, Utils.MAX_INITIAL_ARRAY_LENGTH));
+        for (int y = 0; y < pushCount; y++)
+            pushes.add(Buffers.readLengthPrefixedBytes(payload));
+        return new TransactionWitness(pushes);
     }
 
     private final List<byte[]> pushes;
 
-    public TransactionWitness(int pushCount) {
-        pushes = new ArrayList<>(Math.min(pushCount, Utils.MAX_INITIAL_ARRAY_LENGTH));
+    private TransactionWitness(List<byte[]> pushes) {
+        for (byte[] push : pushes)
+            Objects.requireNonNull(push);
+        this.pushes = pushes;
     }
 
+    /**
+     * Get the stack push at a specified index.
+     *
+     * @param i index to get push at
+     * @return stack push
+     */
     public byte[] getPush(int i) {
         return pushes.get(i);
     }
 
+    /**
+     * Gets the number of stack pushes in this witness.
+     *
+     * @return number of pushes
+     */
     public int getPushCount() {
         return pushes.size();
     }
 
-    public void setPush(int i, byte[] value) {
-        while (i >= pushes.size()) {
-            pushes.add(new byte[]{});
-        }
-        pushes.set(i, value);
+    /**
+     * Write this transaction witness into the given buffer.
+     *
+     * @param buf buffer to write into
+     * @return the buffer
+     * @throws BufferOverflowException if the serialized data doesn't fit the remaining buffer
+     */
+    public ByteBuffer write(ByteBuffer buf) throws BufferOverflowException {
+        VarInt.of(pushes.size()).write(buf);
+        for (byte[] push : pushes)
+            Buffers.writeLengthPrefixedBytes(buf, push);
+        return buf;
     }
 
-    protected void bitcoinSerializeToStream(OutputStream stream) throws IOException {
-        stream.write(new VarInt(pushes.size()).encode());
-        for (byte[] push : pushes) {
-            stream.write(new VarInt(push.length).encode());
-            stream.write(push);
-        }
+    /**
+     * Allocates a byte array and writes this transaction witness into it.
+     *
+     * @return byte array containing the transaction witness
+     */
+    public byte[] serialize() {
+        return write(ByteBuffer.allocate(messageSize())).array();
+    }
+
+    /**
+     * Return the size of the serialized message. Note that if the message was deserialized from a payload, this
+     * size can differ from the size of the original payload.
+     *
+     * @return size of the serialized message in bytes
+     */
+    public int messageSize() {
+        return VarInt.sizeOf(pushes.size()) +
+                pushes.stream()
+                        .mapToInt(Buffers::lengthPrefixedBytesSize)
+                        .sum();
     }
 
     @Override
     public String toString() {
         List<String> stringPushes = new ArrayList<>(pushes.size());
         for (byte[] push : pushes) {
-            if (push == null) {
-                stringPushes.add("NULL");
-            } else if (push.length == 0) {
+            if (push.length == 0) {
                 stringPushes.add("EMPTY");
             } else {
-                stringPushes.add(Utils.HEX.encode(push));
+                stringPushes.add(ByteUtils.formatHex(push));
             }
         }
-        return Utils.SPACE_JOINER.join(stringPushes);
+        return InternalUtils.SPACE_JOINER.join(stringPushes);
     }
 
     @Override
@@ -116,7 +207,7 @@ public class TransactionWitness {
     public int hashCode() {
         int hashCode = 1;
         for (byte[] push : pushes) {
-            hashCode = 31 * hashCode + (push == null ? 0 : Arrays.hashCode(push));
+            hashCode = 31 * hashCode + Arrays.hashCode(push);
         }
         return hashCode;
     }

@@ -16,17 +16,18 @@
 
 package org.bitcoinj.utils;
 
-import static org.bitcoinj.core.Coin.SMALLEST_UNIT_EXPONENT;
-import static com.google.common.base.Preconditions.checkArgument;
-import java.util.Objects;
-import org.bitcoinj.core.Coin;
+import org.bitcoinj.base.Coin;
 
 import java.math.BigInteger;
 import java.text.DecimalFormat;
 import java.text.Format;
 import java.text.NumberFormat;
-import java.util.Locale;
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+
+import static org.bitcoinj.base.Coin.SMALLEST_UNIT_EXPONENT;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
 
 /**
  * <p>This class, a concrete extension of {@link BtcFormat}, is distinguished in that each
@@ -35,8 +36,8 @@ import java.util.List;
  *
  * <p>By default, neither currency codes nor symbols are included in formatted values as
  * output, nor recognized in parsed values as input.  The can be overridden by applying a
- * custom pattern using either the {@link BtcFormat.Builder#localizedPattern} or
- * {@link BtcFormat.Builder#localizedPattern} methods, as described in the documentation for
+ * custom pattern using either the {@link BtcFormat.Builder#localizedPattern(String)} or
+ * {@link BtcFormat.Builder#localizedPattern(String)} methods, as described in the documentation for
  * the {@link BtcFormat.Builder} class.</p>
  *
  * <p>A more detailed explanation, including examples, is in the documentation for the
@@ -78,10 +79,8 @@ public final class BtcFixedFormat extends BtcFormat {
         Locale locale, int scale, int minDecimals, List<Integer> groups
     ) {
         super((DecimalFormat)NumberFormat.getInstance(locale), minDecimals, groups);
-        checkArgument(
-            scale <= SMALLEST_UNIT_EXPONENT,
-            "decimal cannot be shifted " + String.valueOf(scale) + " places"
-        );
+        checkArgument(scale <= SMALLEST_UNIT_EXPONENT, () ->
+                "decimal cannot be shifted " + String.valueOf(scale) + " places");
         this.scale = scale;
     }
 

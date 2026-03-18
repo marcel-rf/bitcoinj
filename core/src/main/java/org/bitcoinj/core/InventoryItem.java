@@ -17,6 +17,8 @@
 
 package org.bitcoinj.core;
 
+import org.bitcoinj.base.Sha256Hash;
+
 import java.util.Objects;
 
 public class InventoryItem {
@@ -53,6 +55,16 @@ public class InventoryItem {
     public InventoryItem(Type type, Sha256Hash hash) {
         this.type = type;
         this.hash = hash;
+    }
+
+    public InventoryItem(Block block) {
+        this.type = Type.BLOCK;
+        this.hash = block.getHash();
+    }
+
+    public InventoryItem(Transaction tx) {
+        this.type = Type.TRANSACTION;
+        this.hash = tx.getTxId();
     }
 
     @Override

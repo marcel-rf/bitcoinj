@@ -16,17 +16,21 @@
 
 package org.bitcoinj.script;
 
-import com.google.common.collect.ImmutableList;
-import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 
-import static org.bitcoinj.script.ScriptOpCodes.*;
+import static org.bitcoinj.script.ScriptOpCodes.OP_NOP;
+import static org.bitcoinj.script.ScriptOpCodes.OP_PUSHDATA1;
+import static org.bitcoinj.script.ScriptOpCodes.OP_PUSHDATA2;
+import static org.bitcoinj.script.ScriptOpCodes.OP_PUSHDATA4;
+import static org.junit.Assert.assertEquals;
 
 /**
  * ScriptChunk.size() determines the size of a serialized ScriptChunk without actually performing serialization.
@@ -54,21 +58,21 @@ public class ScriptChunkSizeTest {
         for (int i = 0; i < 0xff + 1; i++)
             pushData1.add(new ScriptChunk(OP_PUSHDATA1, randomBytes(i)));
 
-        ArrayList<ScriptChunk> pushData2 = new ArrayList<>((int)Script.MAX_SCRIPT_ELEMENT_SIZE + 1);
-        for (int i = 0; i < Script.MAX_SCRIPT_ELEMENT_SIZE + 1; i++)
+        ArrayList<ScriptChunk> pushData2 = new ArrayList<>(ScriptExecution.MAX_SCRIPT_ELEMENT_SIZE + 1);
+        for (int i = 0; i < ScriptExecution.MAX_SCRIPT_ELEMENT_SIZE + 1; i++)
             pushData2.add(new ScriptChunk(OP_PUSHDATA2, randomBytes(i)));
 
-        ArrayList<ScriptChunk> pushData4 = new ArrayList<>((int)Script.MAX_SCRIPT_ELEMENT_SIZE + 1);
-        for (int i = 0; i < Script.MAX_SCRIPT_ELEMENT_SIZE + 1; i++)
+        ArrayList<ScriptChunk> pushData4 = new ArrayList<>(ScriptExecution.MAX_SCRIPT_ELEMENT_SIZE + 1);
+        for (int i = 0; i < ScriptExecution.MAX_SCRIPT_ELEMENT_SIZE + 1; i++)
             pushData4.add(new ScriptChunk(OP_PUSHDATA4, randomBytes(i)));
 
-        return ImmutableList.<ScriptChunk>builder()
-                .addAll(opcodes)
-                .addAll(smallData)
-                .addAll(pushData1)
-                .addAll(pushData2)
-                .addAll(pushData4)
-                .build();
+        List<ScriptChunk> temp = new ArrayList<>();
+        temp.addAll(opcodes);
+        temp.addAll(smallData);
+        temp.addAll(pushData1);
+        temp.addAll(pushData2);
+        temp.addAll(pushData4);
+        return Collections.unmodifiableList(temp);
     }
 
     private static byte[] randomBytes(int size) {
@@ -79,6 +83,6 @@ public class ScriptChunkSizeTest {
 
     @Test
     public void testSize() {
-        Assert.assertEquals(scriptChunk.toByteArray().length, scriptChunk.size());
+        assertEquals(scriptChunk.toByteArray().length, scriptChunk.size());
     }
 }

@@ -16,32 +16,58 @@
 
 package org.bitcoinj.core;
 
-import com.google.common.collect.ImmutableList;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.base.internal.InternalUtils;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Represents Block Locator in GetBlocks and GetHeaders messages
  **/
 public final class BlockLocator {
-    private final ImmutableList<Sha256Hash> hashes;
+    private final List<Sha256Hash> hashes;  // unmodifiable list
 
+    /**
+     * @deprecated Use {@link BlockLocator#BlockLocator(List)}
+     */
+    @Deprecated
     public BlockLocator() {
-        hashes = ImmutableList.of();
+        hashes = Collections.emptyList();
     }
 
     /**
      * Creates a Block locator with defined list of hashes.
      */
-    public BlockLocator(ImmutableList<Sha256Hash> hashes) {
-        this.hashes = hashes;
+    public BlockLocator(List<Sha256Hash> hashes) {
+        this.hashes = Collections.unmodifiableList(hashes);
+    }
+
+    // Used by tests
+    static BlockLocator ofBlocks(Block... blocks) {
+        return new BlockLocator(Arrays.stream(blocks)
+                .map(Block::getHash)
+                .collect(Collectors.toList()));
+    }
+
+    // Create a new BlockLocator by copying an instance and appending an element
+    @Deprecated
+    private BlockLocator(BlockLocator old, Sha256Hash hashToAdd) {
+        this(Stream.concat(old.hashes.stream(), Stream.of(hashToAdd))
+                .collect(Collectors.toList())
+        );
     }
 
     /**
      * Add a {@link Sha256Hash} to a newly created block locator.
+     * @deprecated Use {@link BlockLocator#BlockLocator(List)}
      */
+    @Deprecated
     public BlockLocator add(Sha256Hash hash) {
-        return new BlockLocator(new ImmutableList.Builder<Sha256Hash>().addAll(this.hashes).add(hash).build());
+        return new BlockLocator(this, hash);
     }
 
     /**
@@ -67,16 +93,14 @@ public final class BlockLocator {
 
     @Override
     public String toString() {
-        return "Block locator with " + size() + " blocks\n " + Utils.SPACE_JOINER.join(hashes);
+        return "Block locator with " + size() + " blocks\n " + InternalUtils.SPACE_JOINER.join(hashes);
     }
 
     @Override
     public int hashCode() {
-        int hashCode = 0;
-        for (Sha256Hash i : hashes) {
-            hashCode ^= i.hashCode();
-        }
-        return hashCode;
+        return hashes.stream()
+                .mapToInt(Sha256Hash::hashCode)
+                .reduce(0, (a, b) -> a ^ b);
     }
 
     @Override

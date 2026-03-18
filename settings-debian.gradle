@@ -1,0 +1,38 @@
+/*
+ * Settings file only for Debian Gradle 4.4.1.
+ * Usage: gradle --settings-file=settings-debian.gradle build
+ */
+
+import org.gradle.util.GradleVersion
+
+// Required Gradle version for build
+def gradleVersion = GradleVersion.version("4.4.1")
+
+if (GradleVersion.current() != gradleVersion) {
+    throw new GradleScriptException("bitcoinj build requires Debian Gradle ${gradleVersion.version}", null)
+}
+
+// we can't test for Java 17 in Gradle 4.4, so at least we test for Java 11
+if (!JavaVersion.current().isJava11Compatible()) {
+    throw new GradleScriptException("bitcoinj build requires Java 17 or later", null)
+}
+
+rootProject.name = 'bitcoinj-parent'
+
+include 'test-support'
+project(':test-support').name = 'bitcoinj-test-support'
+
+include 'base'
+project(':base').name = 'bitcoinj-base'
+
+include 'core'
+project(':core').name = 'bitcoinj-core'
+
+include 'tools'
+project(':tools').name = 'bitcoinj-tools'
+
+include 'wallettool'
+project(':wallettool').name = 'bitcoinj-wallettool'
+
+include 'examples'
+project(':examples').name = 'bitcoinj-examples'

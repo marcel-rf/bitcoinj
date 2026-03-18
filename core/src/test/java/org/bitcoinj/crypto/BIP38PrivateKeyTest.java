@@ -16,26 +16,19 @@
 
 package org.bitcoinj.crypto;
 
-import org.bitcoinj.core.AddressFormatException;
-import org.bitcoinj.core.Base58;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.exceptions.AddressFormatException;
+import org.bitcoinj.base.Base58;
 import org.bitcoinj.crypto.BIP38PrivateKey.BadPassphraseException;
-import org.bitcoinj.params.MainNetParams;
-import org.bitcoinj.params.TestNet3Params;
 import org.junit.Test;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotSame;
+
+import static org.bitcoinj.base.BitcoinNetwork.MAINNET;
+import static org.bitcoinj.base.BitcoinNetwork.TESTNET;
 
 public class BIP38PrivateKeyTest {
-    private static final NetworkParameters MAINNET = MainNetParams.get();
-    private static final NetworkParameters TESTNET = TestNet3Params.get();
 
     @Test
     public void bip38testvector_noCompression_noEcMultiply_test1() throws Exception {
@@ -127,7 +120,7 @@ public class BIP38PrivateKeyTest {
     @Test
     public void bitcoinpaperwallet_testnet() throws Exception {
         // values taken from bitcoinpaperwallet.com
-        BIP38PrivateKey encryptedKey = BIP38PrivateKey.fromBase58(TESTNET,
+        BIP38PrivateKey encryptedKey = BIP38PrivateKey.fromBase58(BitcoinNetwork.TESTNET,
                 "6PRPhQhmtw6dQu6jD8E1KS4VphwJxBS9Eh9C8FQELcrwN3vPvskv9NKvuL");
         ECKey key = encryptedKey.decrypt("password");
         assertEquals("93MLfjbY6ugAsLeQfFY6zodDa8izgm1XAwA9cpMbUTwLkDitopg", key.getPrivateKeyEncoded(TESTNET)
@@ -137,7 +130,7 @@ public class BIP38PrivateKeyTest {
     @Test
     public void bitaddress_testnet() throws Exception {
         // values taken from bitaddress.org
-        BIP38PrivateKey encryptedKey = BIP38PrivateKey.fromBase58(TESTNET,
+        BIP38PrivateKey encryptedKey = BIP38PrivateKey.fromBase58(BitcoinNetwork.TESTNET,
                 "6PfMmVHn153N3x83Yiy4Nf76dHUkXufe2Adr9Fw5bewrunGNeaw2QCpifb");
         ECKey key = encryptedKey.decrypt("password");
         assertEquals("91tCpdaGr4Khv7UAuUxa6aMqeN5GcPVJxzLtNsnZHTCndxkRcz2", key.getPrivateKeyEncoded(TESTNET)
@@ -154,40 +147,11 @@ public class BIP38PrivateKeyTest {
     @Test(expected = AddressFormatException.InvalidDataLength.class)
     public void fromBase58_invalidLength() {
         String base58 = Base58.encodeChecked(1, new byte[16]);
-        BIP38PrivateKey.fromBase58(null, base58);
+        BIP38PrivateKey.fromBase58(TESTNET, base58);
     }
 
     @Test
-    public void testJavaSerialization() throws Exception {
-        BIP38PrivateKey testKey = BIP38PrivateKey.fromBase58(TESTNET,
-                "6PfMmVHn153N3x83Yiy4Nf76dHUkXufe2Adr9Fw5bewrunGNeaw2QCpifb");
-        ByteArrayOutputStream os = new ByteArrayOutputStream();
-        new ObjectOutputStream(os).writeObject(testKey);
-        BIP38PrivateKey testKeyCopy = (BIP38PrivateKey) new ObjectInputStream(
-                new ByteArrayInputStream(os.toByteArray())).readObject();
-        assertEquals(testKey, testKeyCopy);
-
-        BIP38PrivateKey mainKey = BIP38PrivateKey.fromBase58(MAINNET,
-                "6PfMmVHn153N3x83Yiy4Nf76dHUkXufe2Adr9Fw5bewrunGNeaw2QCpifb");
-        os = new ByteArrayOutputStream();
-        new ObjectOutputStream(os).writeObject(mainKey);
-        BIP38PrivateKey mainKeyCopy = (BIP38PrivateKey) new ObjectInputStream(
-                new ByteArrayInputStream(os.toByteArray())).readObject();
-        assertEquals(mainKey, mainKeyCopy);
-    }
-
-    @Test
-    public void cloning() throws Exception {
-        BIP38PrivateKey a = BIP38PrivateKey.fromBase58(TESTNET, "6PfMmVHn153N3x83Yiy4Nf76dHUkXufe2Adr9Fw5bewrunGNeaw2QCpifb");
-        // TODO: Consider overriding clone() in BIP38PrivateKey to narrow the type
-        BIP38PrivateKey b = (BIP38PrivateKey) a.clone();
-
-        assertEquals(a, b);
-        assertNotSame(a, b);
-    }
-
-    @Test
-    public void roundtripBase58() throws Exception {
+    public void roundtripBase58() {
         String base58 = "6PfMmVHn153N3x83Yiy4Nf76dHUkXufe2Adr9Fw5bewrunGNeaw2QCpifb";
         assertEquals(base58, BIP38PrivateKey.fromBase58(MAINNET, base58).toBase58());
     }

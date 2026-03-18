@@ -16,30 +16,31 @@
 
 package wallettemplate;
 
-import javafx.beans.binding.Binding;
-import javafx.beans.binding.Bindings;
-import javafx.beans.value.ObservableValue;
-import javafx.scene.Scene;
-import javafx.scene.input.KeyCombination;
-import javafx.scene.layout.Pane;
-import org.bitcoinj.core.listeners.DownloadProgressTracker;
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.utils.MonetaryFormat;
 import javafx.animation.FadeTransition;
 import javafx.animation.ParallelTransition;
 import javafx.animation.TranslateTransition;
+import javafx.beans.binding.Binding;
+import javafx.beans.binding.Bindings;
+import javafx.beans.value.ObservableValue;
 import javafx.event.ActionEvent;
+import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.input.KeyCombination;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
 import javafx.util.Duration;
+import org.bitcoinj.base.Coin;
+import org.bitcoinj.base.utils.MonetaryFormat;
+import org.bitcoinj.core.Peer;
+import org.bitcoinj.core.listeners.DownloadProgressTracker;
 import org.bitcoinj.walletfx.application.MainWindowController;
 import org.bitcoinj.walletfx.application.WalletApplication;
-import org.bitcoinj.walletfx.utils.GuiUtils;
-import org.bitcoinj.walletfx.utils.TextFieldValidator;
 import org.bitcoinj.walletfx.controls.ClickableBitcoinAddress;
 import org.bitcoinj.walletfx.controls.NotificationBarPane;
 import org.bitcoinj.walletfx.utils.BitcoinUIModel;
+import org.bitcoinj.walletfx.utils.GuiUtils;
+import org.bitcoinj.walletfx.utils.TextFieldValidator;
 import org.bitcoinj.walletfx.utils.easing.EasingMode;
 import org.bitcoinj.walletfx.utils.easing.ElasticInterpolator;
 
@@ -83,7 +84,11 @@ public class MainController extends MainWindowController {
         // Add CSS that we need. cssResourceName will be loaded from the same package as this class.
         scene.getStylesheets().add(getClass().getResource(cssResourceName).toString());
         uiStack.getChildren().add(notificationBar);
-        scene.getAccelerators().put(KeyCombination.valueOf("Shortcut+F"), () -> app.walletAppKit().peerGroup().getDownloadPeer().close());
+        scene.getAccelerators().put(KeyCombination.valueOf("Shortcut+F"), () -> {
+            Peer peer = app.walletAppKit().peerGroup().getDownloadPeer();
+            if (peer != null)
+                peer.close();
+        });
     }
 
     @Override

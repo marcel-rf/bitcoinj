@@ -20,31 +20,42 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.text.MessageFormat;
-import java.util.Date;
-import java.util.logging.*;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.logging.Formatter;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 /**
  * A Java logging formatter that writes more compact output than the default.
  */
 public class BriefLogFormatter extends Formatter {
-    private static final MessageFormat messageFormat = new MessageFormat("{3,date,HH:mm:ss} {0} {1}.{2}: {4}\n{5}");
+    private static final MessageFormat messageFormat = new MessageFormat("{3} {0} {1}.{2}: {4}\n{5}");
 
     // OpenJDK made a questionable, backwards incompatible change to the Logger implementation. It internally uses
     // weak references now which means simply fetching the logger and changing its configuration won't work. We must
     // keep a reference to our custom logger around.
     private static final Logger logger = Logger.getLogger("");
 
-    /** Configures JDK logging to use this class for everything. */
     public static void init() {
+        init(Level.INFO);
+    }
+
+    /** Configures JDK logging to use this class for everything. */
+    public static void init(Level level) {
         final Handler[] handlers = logger.getHandlers();
         // In regular Java there is always a handler. Avian doesn't install one however.
         if (handlers.length > 0)
             handlers[0].setFormatter(new BriefLogFormatter());
+        logger.setLevel(level);
     }
 
     public static void initVerbose() {
-        init();
-        logger.setLevel(Level.ALL);
+        init(Level.ALL);
         logger.log(Level.FINE, "test");
     }
 
@@ -62,7 +73,8 @@ public class BriefLogFormatter extends Formatter {
         String className = fullClassName.substring(lastDot + 1);
         arguments[1] = className;
         arguments[2] = logRecord.getSourceMethodName();
-        arguments[3] = new Date(logRecord.getMillis());
+        arguments[3] = DateTimeFormatter.ISO_LOCAL_TIME.format(
+                LocalDateTime.ofInstant(Instant.ofEpochMilli(logRecord.getMillis()), ZoneOffset.UTC));
         arguments[4] = logRecord.getMessage();
         if (logRecord.getThrown() != null) {
             Writer result = new StringWriter();

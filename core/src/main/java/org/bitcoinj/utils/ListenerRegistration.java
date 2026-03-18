@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Google Inc.
+ * Copyright by the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@
 package org.bitcoinj.utils;
 
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Executor;
-
-import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
 * A simple wrapper around a listener and an executor, with some utility methods.
@@ -29,21 +29,27 @@ public class ListenerRegistration<T> {
     public final Executor executor;
 
     public ListenerRegistration(T listener, Executor executor) {
-        this.listener = checkNotNull(listener);
-        this.executor = checkNotNull(executor);
+        this.listener = Objects.requireNonNull(listener);
+        this.executor = Objects.requireNonNull(executor);
     }
 
-    /** Returns true if the listener was removed, else false. */
+    /**
+     * Remove wrapped listener
+     * @param listener listener to remove
+     * @param list list to remove it from
+     * @return true if the listener was removed, else false.
+     * @param <T>
+     */
     public static <T> boolean removeFromList(T listener, List<? extends ListenerRegistration<T>> list) {
-        checkNotNull(listener);
+        Objects.requireNonNull(listener);
 
-        ListenerRegistration<T> item = null;
-        for (ListenerRegistration<T> registration : list) {
-            if (registration.listener == listener) {
-                item = registration;
-                break;
-            }
-        }
-        return item != null && list.remove(item);
+        // Find matching ListenerRegistration (if any)
+        Optional<? extends ListenerRegistration<T>> optRegistration = list.stream()
+                .filter(r -> r.listener == listener)
+                .findFirst();
+        // If ListenerRegistration found, call list::remove
+        Optional<Boolean> optBool = optRegistration.map(list::remove);
+        // Return result of list::remove or false
+        return optBool.orElse(false);
     }
 }

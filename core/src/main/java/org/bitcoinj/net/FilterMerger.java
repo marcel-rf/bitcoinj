@@ -16,12 +16,18 @@
 
 package org.bitcoinj.net;
 
+import org.bitcoinj.base.internal.TimeUtils;
 import org.bitcoinj.core.BloomFilter;
 import org.bitcoinj.core.PeerFilterProvider;
-import com.google.common.collect.ImmutableList;
 import org.bitcoinj.core.PeerGroup;
+import org.jspecify.annotations.Nullable;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Collections;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.Random;
 
 // This code is unit tested by the PeerGroup tests.
 
@@ -39,23 +45,25 @@ import java.util.LinkedList;
  */
 public class FilterMerger {
     // We use a constant tweak to avoid giving up privacy when we regenerate our filter with new keys
-    private final long bloomFilterTweak = (long) (Math.random() * Long.MAX_VALUE);
+    private final int bloomFilterTweak = new Random().nextInt();
 
+    // TODO: Make final after deprecated setBloomFilterFPRate() method is removed
     private volatile double vBloomFilterFPRate;
     private int lastBloomFilterElementCount;
-    private BloomFilter lastFilter;
+    @Nullable private BloomFilter lastFilter;
 
     public FilterMerger(double bloomFilterFPRate) {
         this.vBloomFilterFPRate = bloomFilterFPRate;
     }
 
     public static class Result {
-        public BloomFilter filter;
-        public long earliestKeyTimeSecs;
+        @Nullable public BloomFilter filter;
+        @Nullable public Instant earliestKeyTime;
         public boolean changed;
     }
 
-    public Result calculate(ImmutableList<PeerFilterProvider> providers) {
+    public Result calculate(List<PeerFilterProvider> providerList) {
+        List<PeerFilterProvider> providers = Collections.unmodifiableList(providerList);
         LinkedList<PeerFilterProvider> begunProviders = new LinkedList<>();
         try {
             // All providers must be in a consistent, unchanging state because the filter is a merged one that's
@@ -67,10 +75,10 @@ public class FilterMerger {
                 begunProviders.add(provider);
             }
             Result result = new Result();
-            result.earliestKeyTimeSecs = Long.MAX_VALUE;
+            result.earliestKeyTime = Instant.MAX;
             int elements = 0;
             for (PeerFilterProvider p : providers) {
-                result.earliestKeyTimeSecs = Math.min(result.earliestKeyTimeSecs, p.getEarliestKeyCreationTime());
+                result.earliestKeyTime = TimeUtils.earlier(result.earliestKeyTime, p.earliestKeyCreationTime());
                 elements += p.getBloomFilterElementCount();
             }
 
@@ -93,7 +101,7 @@ public class FilterMerger {
             // Now adjust the earliest key time backwards by a week to handle the case of clock drift. This can occur
             // both in block header timestamps and if the users clock was out of sync when the key was first created
             // (to within a small amount of tolerance).
-            result.earliestKeyTimeSecs -= 86400 * 7;
+            result.earliestKeyTime = result.earliestKeyTime.minus(7, ChronoUnit.DAYS);
             return result;
         } finally {
             for (PeerFilterProvider provider : begunProviders) {
@@ -102,6 +110,7 @@ public class FilterMerger {
         }
     }
 
+    @Deprecated
     public void setBloomFilterFPRate(double bloomFilterFPRate) {
         this.vBloomFilterFPRate = bloomFilterFPRate;
     }
@@ -110,6 +119,7 @@ public class FilterMerger {
         return vBloomFilterFPRate;
     }
 
+    @Nullable
     public BloomFilter getLastFilter() {
         return lastFilter;
     }

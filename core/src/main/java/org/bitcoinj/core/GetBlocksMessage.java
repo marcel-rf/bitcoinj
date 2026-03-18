@@ -1,6 +1,5 @@
 /*
- * Copyright 2011 Google Inc.
- * Copyright 2015 Andreas Schildbach
+ * Copyright by the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,8 +16,17 @@
 
 package org.bitcoinj.core;
 
-import java.io.IOException;
-import java.io.OutputStream;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.base.VarInt;
+import org.bitcoinj.base.internal.ByteUtils;
+
+import java.nio.BufferOverflowException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.bitcoinj.base.internal.Preconditions.check;
 
 /**
  * <p>Represents the "getblocks" P2P network message, which requests the hashes of the parts of the block chain we're
@@ -26,36 +34,38 @@ import java.io.OutputStream;
  * 
  * <p>Instances of this class are not safe for use by multiple threads.</p>
  */
-public class GetBlocksMessage extends Message {
+public class GetBlocksMessage implements Message {
 
     protected long version;
     protected BlockLocator locator;
     protected Sha256Hash stopHash;
 
-    public GetBlocksMessage(NetworkParameters params, BlockLocator locator, Sha256Hash stopHash) {
-        super(params);
-        this.version = serializer.getProtocolVersion();
-        this.locator = locator;
-        this.stopHash = stopHash;
-    }
-
-    public GetBlocksMessage(NetworkParameters params, byte[] payload) throws ProtocolException {
-        super(params, payload, 0);
-    }
-
-    @Override
-    protected void parse() throws ProtocolException {
-        cursor = offset;
-        version = readUint32();
-        int startCount = readVarInt().intValue();
+    /**
+     * Deserialize this message from a given payload.
+     *
+     * @param payload payload to deserialize from
+     * @return read message
+     * @throws BufferUnderflowException if the read message extends beyond the remaining bytes of the payload
+     */
+    public static GetBlocksMessage read(ByteBuffer payload) throws BufferUnderflowException, ProtocolException {
+        long version = ByteUtils.readUint32(payload);
+        VarInt startCountVarInt = VarInt.read(payload);
+        check(startCountVarInt.fitsInt(), BufferUnderflowException::new);
+        int startCount = startCountVarInt.intValue();
         if (startCount > 500)
             throw new ProtocolException("Number of locators cannot be > 500, received: " + startCount);
-        length = cursor - offset + ((startCount + 1) * 32);
-        locator = new BlockLocator();
+        List<Sha256Hash> hashList = new ArrayList<>();
         for (int i = 0; i < startCount; i++) {
-            locator = locator.add(readHash());
+            hashList.add(Sha256Hash.read(payload));
         }
-        stopHash = readHash();
+        Sha256Hash stopHash = Sha256Hash.read(payload);
+        return new GetBlocksMessage(version, new BlockLocator(hashList), stopHash);
+    }
+
+    public GetBlocksMessage(long protocolVersion, BlockLocator locator, Sha256Hash stopHash) {
+        this.version = protocolVersion;
+        this.locator = locator;
+        this.stopHash = stopHash;
     }
 
     public BlockLocator getLocator() {
@@ -72,19 +82,28 @@ public class GetBlocksMessage extends Message {
     }
 
     @Override
-    protected void bitcoinSerializeToStream(OutputStream stream) throws IOException {
+    public int messageSize() {
+        return 4 + // version
+                VarInt.sizeOf(locator.size()) +
+                locator.size() * Sha256Hash.LENGTH + // hashes
+                Sha256Hash.LENGTH; // stopHash
+    }
+
+    @Override
+    public ByteBuffer write(ByteBuffer buf) throws BufferOverflowException {
         // Version, for some reason.
-        Utils.uint32ToByteStreamLE(serializer.getProtocolVersion(), stream);
+        ByteUtils.writeInt32LE(version, buf);
         // Then a vector of block hashes. This is actually a "block locator", a set of block
         // identifiers that spans the entire chain with exponentially increasing gaps between
         // them, until we end up at the genesis block. See CBlockLocator::Set()
-        stream.write(new VarInt(locator.size()).encode());
+        VarInt.of(locator.size()).write(buf);
         for (Sha256Hash hash : locator.getHashes()) {
             // Have to reverse as wire format is little endian.
-            stream.write(hash.getReversedBytes());
+            hash.write(buf);
         }
         // Next, a block ID to stop at.
-        stream.write(stopHash.getReversedBytes());
+        stopHash.write(buf);
+        return buf;
     }
 
     @Override

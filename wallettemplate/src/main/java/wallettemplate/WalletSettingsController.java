@@ -16,11 +16,8 @@
 
 package wallettemplate;
 
-import org.bitcoinj.core.Utils;
-import org.bitcoinj.crypto.MnemonicCode;
-import org.bitcoinj.wallet.DeterministicSeed;
-import com.google.common.base.Splitter;
 import com.google.common.util.concurrent.Service;
+import org.jspecify.annotations.Nullable;
 import javafx.application.Platform;
 import javafx.beans.binding.BooleanBinding;
 import javafx.event.ActionEvent;
@@ -28,23 +25,28 @@ import javafx.fxml.FXML;
 import javafx.scene.control.Button;
 import javafx.scene.control.DatePicker;
 import javafx.scene.control.TextArea;
+import org.bitcoinj.base.internal.InternalUtils;
+import org.bitcoinj.crypto.AesKey;
+import org.bitcoinj.crypto.MnemonicCode;
+import org.bitcoinj.wallet.DeterministicSeed;
 import org.bitcoinj.walletfx.application.WalletApplication;
 import org.bitcoinj.walletfx.overlay.OverlayController;
 import org.bitcoinj.walletfx.overlay.OverlayableStackPaneController;
+import org.bitcoinj.walletfx.utils.TextFieldValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.bouncycastle.crypto.params.KeyParameter;
-import org.bitcoinj.walletfx.utils.TextFieldValidator;
 
-import javax.annotation.Nullable;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Objects;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static javafx.beans.binding.Bindings.*;
+import static javafx.beans.binding.Bindings.createBooleanBinding;
+import static javafx.beans.binding.Bindings.equal;
+import static javafx.beans.binding.Bindings.not;
+import static javafx.beans.binding.Bindings.or;
 import static org.bitcoinj.walletfx.utils.GuiUtils.checkGuiThread;
 import static org.bitcoinj.walletfx.utils.GuiUtils.informationalAlert;
 import static org.bitcoinj.walletfx.utils.WTUtils.didThrow;
@@ -62,7 +64,7 @@ public class WalletSettingsController implements OverlayController<WalletSetting
     private OverlayableStackPaneController rootController;
     private OverlayableStackPaneController.OverlayUI<? extends OverlayController<WalletSettingsController>> overlayUI;
 
-    private KeyParameter aesKey;
+    private AesKey aesKey;
 
     @Override
     public void initOverlay(OverlayableStackPaneController overlayableStackPaneController, OverlayableStackPaneController.OverlayUI<? extends OverlayController<WalletSettingsController>> ui) {
@@ -71,7 +73,7 @@ public class WalletSettingsController implements OverlayController<WalletSetting
     }
 
     // Note: NOT called by FXMLLoader!
-    public void initialize(@Nullable KeyParameter aesKey) {
+    public void initialize(@Nullable AesKey aesKey) {
         app = WalletApplication.instance();
         DeterministicSeed seed = app.walletAppKit().wallet().getKeyChainSeed();
         if (aesKey == null) {
@@ -83,26 +85,26 @@ public class WalletSettingsController implements OverlayController<WalletSetting
             }
         } else {
             this.aesKey = aesKey;
-            seed = seed.decrypt(checkNotNull(app.walletAppKit().wallet().getKeyCrypter()), "", aesKey);
+            seed = seed.decrypt(Objects.requireNonNull(app.walletAppKit().wallet().getKeyCrypter()), "", aesKey);
             // Now we can display the wallet seed as appropriate.
             passwordButton.setText("Remove password");
         }
 
         // Set the date picker to show the birthday of this wallet.
-        Instant creationTime = Instant.ofEpochSecond(seed.getCreationTimeSeconds());
+        Instant creationTime = seed.getCreationTime().get();
         LocalDate origDate = creationTime.atZone(ZoneId.systemDefault()).toLocalDate();
         datePicker.setValue(origDate);
 
         // Set the mnemonic seed words.
         final List<String> mnemonicCode = seed.getMnemonicCode();
-        checkNotNull(mnemonicCode);    // Already checked for encryption.
-        String origWords = Utils.SPACE_JOINER.join(mnemonicCode);
+        Objects.requireNonNull(mnemonicCode);    // Already checked for encryption.
+        String origWords = InternalUtils.SPACE_JOINER.join(mnemonicCode);
         wordsArea.setText(origWords);
 
         // Validate words as they are being typed.
         MnemonicCode codec = unchecked(MnemonicCode::new);
         TextFieldValidator validator = new TextFieldValidator(wordsArea, text ->
-            !didThrow(() -> codec.check(Splitter.on(' ').splitToList(text)))
+            !didThrow(() -> codec.check(InternalUtils.splitter(" ").splitToList(text)))
         );
 
         // Clear the date picker if the user starts editing the words, if it contained the current wallets date.
@@ -180,8 +182,8 @@ public class WalletSettingsController implements OverlayController<WalletSetting
         overlayUI.done();
         app.mainWindowController().restoreFromSeedAnimation();
 
-        long birthday = datePicker.getValue().atStartOfDay().toEpochSecond(ZoneOffset.UTC);
-        DeterministicSeed seed = new DeterministicSeed(Splitter.on(' ').splitToList(wordsArea.getText()), null, "", birthday);
+        Instant birthday = datePicker.getValue().atStartOfDay().toInstant(ZoneOffset.UTC);
+        DeterministicSeed seed = DeterministicSeed.ofMnemonic(InternalUtils.splitter(" ").splitToList(wordsArea.getText()),"", birthday);
         // Shut down bitcoinj and restart it with the new seed.
         app.walletAppKit().addListener(new Service.Listener() {
             @Override

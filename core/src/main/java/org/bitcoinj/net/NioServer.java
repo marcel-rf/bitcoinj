@@ -16,28 +16,32 @@
 
 package org.bitcoinj.net;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.*;
-import java.nio.channels.spi.SelectorProvider;
-import java.util.Iterator;
-
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.AbstractExecutionThreadService;
+import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.spi.SelectorProvider;
+import java.util.Iterator;
 
 /**
  * Creates a simple server listener which listens for incoming client connections and uses a {@link StreamConnection} to
  * process data.
  */
 public class NioServer extends AbstractExecutionThreadService {
-    private static final org.slf4j.Logger log = LoggerFactory.getLogger(NioServer.class);
+    private static final Logger log = LoggerFactory.getLogger(NioServer.class);
 
     private final StreamConnectionFactory connectionFactory;
 
     private final ServerSocketChannel sc;
-    @VisibleForTesting final Selector selector;
+    // For testing only
+    final Selector selector;
 
     // Handle a SelectionKey which was selected
     private void handleKey(Selector selector, SelectionKey key) throws IOException {
@@ -47,17 +51,25 @@ public class NioServer extends AbstractExecutionThreadService {
             newChannel.configureBlocking(false);
             SelectionKey newKey = newChannel.register(selector, SelectionKey.OP_READ);
             try {
-                ConnectionHandler handler = new ConnectionHandler(connectionFactory, newKey);
+                ConnectionHandler handler = newHandler(newKey);
                 newKey.attach(handler);
                 handler.connection.connectionOpened();
             } catch (IOException e) {
                 // This can happen if ConnectionHandler's call to get a new handler returned null
-                log.error("Error handling new connection", Throwables.getRootCause(e).getMessage());
+                log.error("Error handling new connection", Throwables.getRootCause(e));
                 newKey.channel().close();
             }
         } else { // Got a closing channel or a channel to a client connection
             ConnectionHandler.handleKey(key);
         }
+    }
+
+    private ConnectionHandler newHandler(SelectionKey key) throws IOException {
+        StreamConnection connection = connectionFactory.getNewConnection(((SocketChannel) key.channel()).socket().getInetAddress(), ((SocketChannel) key.channel()).socket().getPort());
+        if (connection == null) {
+            throw new IOException("Parser factory.getNewConnection returned null");
+        }
+        return new ConnectionHandler(connection, key);
     }
 
     /**
@@ -77,7 +89,7 @@ public class NioServer extends AbstractExecutionThreadService {
     }
 
     @Override
-    protected void run() throws Exception {
+    protected void run() {
         try {
             while (isRunning()) {
                 selector.select();
@@ -90,8 +102,8 @@ public class NioServer extends AbstractExecutionThreadService {
                     handleKey(selector, key);
                 }
             }
-        } catch (Exception e) {
-            log.error("Error trying to open/read from connection: {}", e);
+        } catch (IOException e) {
+            log.error("Error trying to open/read from connection", e);
         } finally {
             // Go through and close everything, without letting IOExceptions get in our way
             for (SelectionKey key : selector.keys()) {

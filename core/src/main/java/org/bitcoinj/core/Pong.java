@@ -1,6 +1,5 @@
 /*
- * Copyright 2012 Matt Corallo
- * Copyright 2015 Andreas Schildbach
+ * Copyright by the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,40 +16,58 @@
 
 package org.bitcoinj.core;
 
-import java.io.IOException;
-import java.io.OutputStream;
+import org.bitcoinj.base.internal.ByteUtils;
+
+import java.nio.BufferOverflowException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
 
 /**
- * <p>Instances of this class are not safe for use by multiple threads.</p>
+ * See <a href="https://github.com/bitcoin/bips/blob/master/bip-0031.mediawiki">BIP31</a> for details.
+ * <p>
+ * Instances of this class are immutable.
  */
-public class Pong extends Message {
-    private long nonce;
+public class Pong implements Message {
+    private final long nonce;
 
-    public Pong(NetworkParameters params, byte[] payloadBytes) throws ProtocolException {
-        super(params, payloadBytes, 0);
-    }
-    
     /**
-     * Create a Pong with a nonce value.
-     * Only use this if the remote node has a protocol version greater than 60000
+     * Deserialize this message from a given payload.
+     *
+     * @param payload payload to deserialize from
+     * @return read message
+     * @throws BufferUnderflowException if the read message extends beyond the remaining bytes of the payload
      */
-    public Pong(long nonce) {
+    public static Pong read(ByteBuffer payload) throws BufferUnderflowException, ProtocolException {
+        return new Pong(ByteUtils.readInt64(payload));
+    }
+
+    /**
+     * Create a pong with a nonce value.
+     *
+     * @param nonce nonce value
+     * @return pong message
+     */
+    public static Pong of(long nonce) {
+        return new Pong(nonce);
+    }
+
+    private Pong(long nonce) {
         this.nonce = nonce;
     }
-    
+
     @Override
-    protected void parse() throws ProtocolException {
-        nonce = readInt64();
-        length = 8;
+    public int messageSize() {
+        return Long.BYTES;
     }
-    
+
     @Override
-    public void bitcoinSerializeToStream(OutputStream stream) throws IOException {
-        Utils.int64ToByteStreamLE(nonce, stream);
+    public ByteBuffer write(ByteBuffer buf) throws BufferOverflowException {
+        ByteUtils.writeInt64LE(nonce, buf);
+        return buf;
     }
     
     /** Returns the nonce sent by the remote peer. */
-    public long getNonce() {
+    public long nonce() {
         return nonce;
     }
 }

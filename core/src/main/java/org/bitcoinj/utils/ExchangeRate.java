@@ -16,19 +16,18 @@
 
 package org.bitcoinj.utils;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import org.bitcoinj.base.utils.Fiat;
+import org.bitcoinj.base.Coin;
 
-import java.io.Serializable;
 import java.math.BigInteger;
-
-import org.bitcoinj.core.Coin;
-
 import java.util.Objects;
+
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
 
 /**
  * An exchange rate is expressed as a ratio of a {@link Coin} and a {@link Fiat} amount.
  */
-public class ExchangeRate implements Serializable {
+public class ExchangeRate {
 
     public final Coin coin;
     public final Fiat fiat;
@@ -37,7 +36,7 @@ public class ExchangeRate implements Serializable {
     public ExchangeRate(Coin coin, Fiat fiat) {
         checkArgument(coin.isPositive());
         checkArgument(fiat.isPositive());
-        checkArgument(fiat.currencyCode != null, "currency code required");
+        Objects.requireNonNull(fiat.currencyCode, "currency code required");
         this.coin = coin;
         this.fiat = fiat;
     }
@@ -66,8 +65,8 @@ public class ExchangeRate implements Serializable {
      * @throws ArithmeticException if the converted coin amount is too high or too low.
      */
     public Coin fiatToCoin(Fiat convertFiat) {
-        checkArgument(convertFiat.currencyCode.equals(fiat.currencyCode), "Currency mismatch: %s vs %s",
-                convertFiat.currencyCode, fiat.currencyCode);
+        checkArgument(convertFiat.currencyCode.equals(fiat.currencyCode), () ->
+                "currency mismatch: " + convertFiat.currencyCode + " vs " + fiat.currencyCode);
         // Use BigInteger because it's much easier to maintain full precision without overflowing.
         final BigInteger converted = BigInteger.valueOf(convertFiat.value).multiply(BigInteger.valueOf(coin.value))
                 .divide(BigInteger.valueOf(fiat.value));

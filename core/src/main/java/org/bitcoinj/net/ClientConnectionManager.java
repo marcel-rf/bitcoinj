@@ -16,28 +16,50 @@
 
 package org.bitcoinj.net;
 
-import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.Service;
 
 import java.net.SocketAddress;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * <p>A generic interface for an object which keeps track of a set of open client connections, creates new ones and
- * ensures they are serviced properly.</p>
- *
- * <p>When the service is stopped via {@link com.google.common.util.concurrent.Service#stopAsync()}, all connections will be closed and
- * the appropriate connectionClosed() calls must be made.</p>
+ * A generic interface for an object which keeps track of a set of open client connections, creates new ones and
+ * ensures they are serviced properly.
+ * <p>
+ * When the service is stopped via {@link #stop()}, all connections will be closed and the appropriate
+ * {@code connectionClosed()} calls must be made.
+ * <p>
+ * <b>Deprecation warning:</b> this class currently extends <b>Guava</b> {@link Service} but this will be removed
+ * in the next release. {@link #start()} amd {@link #stop()} have been provided to replace existing uses of {@link Service}
+ * methods and in a future release {@link ClientConnectionManager} instances will not be Guava services.
  */
 public interface ClientConnectionManager extends Service {
     /**
      * Creates a new connection to the given address, with the given connection used to handle incoming data. Any errors
      * that occur during connection will be returned in the given future, including errors that can occur immediately.
      */
-    ListenableFuture<SocketAddress> openConnection(SocketAddress serverAddress, StreamConnection connection);
+    CompletableFuture<SocketAddress> openConnection(SocketAddress serverAddress, StreamConnection connection);
 
     /** Gets the number of connected peers */
     int getConnectedClientCount();
 
     /** Closes n peer connections */
     void closeConnections(int n);
+
+    /**
+     * Start the service asynchronously.
+     * @return a future that will complete when the service is started
+     */
+    default CompletableFuture<Void> start() {
+        startAsync();
+        return CompletableFuture.runAsync(this::awaitRunning);
+    }
+
+    /**
+     * Stop the service asynchronously and close all connections.
+     * @return a future that will complete when the service is stopped
+     */
+    default CompletableFuture<Void> stop() {
+        stopAsync();
+        return CompletableFuture.runAsync(this::awaitTerminated);
+    }
 }

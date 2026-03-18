@@ -17,52 +17,78 @@
 
 package org.bitcoinj.wallet;
 
-import com.google.common.annotations.*;
-import com.google.common.collect.*;
-import com.google.common.math.IntMath;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.protobuf.*;
-import net.jcip.annotations.*;
-import org.bitcoinj.core.listeners.*;
-import org.bitcoinj.core.Address;
-import org.bitcoinj.core.Base58;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.protobuf.ByteString;
+import org.bitcoinj.core.internal.GuardedBy;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.exceptions.AddressFormatException;
+import org.bitcoinj.base.internal.ByteUtils;
+import org.bitcoinj.base.internal.PlatformUtils;
+import org.bitcoinj.base.internal.TimeUtils;
+import org.bitcoinj.base.internal.StreamUtils;
+import org.bitcoinj.crypto.AesKey;
 import org.bitcoinj.core.AbstractBlockChain;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.Base58;
+import org.bitcoinj.base.AddressParser;
 import org.bitcoinj.core.BlockChain;
 import org.bitcoinj.core.BloomFilter;
-import org.bitcoinj.core.Coin;
+import org.bitcoinj.base.Coin;
 import org.bitcoinj.core.Context;
-import org.bitcoinj.core.ECKey;
+import org.bitcoinj.crypto.ECKey;
 import org.bitcoinj.core.FilteredBlock;
 import org.bitcoinj.core.InsufficientMoneyException;
-import org.bitcoinj.core.LegacyAddress;
+import org.bitcoinj.base.LegacyAddress;
 import org.bitcoinj.core.Message;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.Peer;
 import org.bitcoinj.core.PeerFilterProvider;
 import org.bitcoinj.core.PeerGroup;
-import org.bitcoinj.core.Sha256Hash;
+import org.bitcoinj.base.Sha256Hash;
 import org.bitcoinj.core.StoredBlock;
 import org.bitcoinj.core.Transaction;
 import org.bitcoinj.core.TransactionBag;
 import org.bitcoinj.core.TransactionBroadcast;
 import org.bitcoinj.core.TransactionBroadcaster;
 import org.bitcoinj.core.TransactionConfidence;
+import org.bitcoinj.core.TransactionConfidence.ConfidenceType;
+import org.bitcoinj.core.TransactionConfidence.Listener;
 import org.bitcoinj.core.TransactionInput;
 import org.bitcoinj.core.TransactionOutPoint;
 import org.bitcoinj.core.TransactionOutput;
 import org.bitcoinj.core.UTXO;
 import org.bitcoinj.core.UTXOProvider;
 import org.bitcoinj.core.UTXOProviderException;
-import org.bitcoinj.core.Utils;
 import org.bitcoinj.core.VerificationException;
-import org.bitcoinj.core.TransactionConfidence.*;
-import org.bitcoinj.crypto.*;
-import org.bitcoinj.script.*;
-import org.bitcoinj.script.Script.ScriptType;
-import org.bitcoinj.signers.*;
-import org.bitcoinj.utils.*;
-import org.bitcoinj.wallet.Protos.Wallet.*;
-import org.bitcoinj.wallet.WalletTransaction.*;
+import org.bitcoinj.core.listeners.NewBestBlockListener;
+import org.bitcoinj.core.listeners.ReorganizeListener;
+import org.bitcoinj.core.listeners.TransactionConfidenceEventListener;
+import org.bitcoinj.core.listeners.TransactionReceivedInBlockListener;
+import org.bitcoinj.crypto.ChildNumber;
+import org.bitcoinj.crypto.DeterministicHierarchy;
+import org.bitcoinj.crypto.DeterministicKey;
+import org.bitcoinj.crypto.HDKeyDerivation;
+import org.bitcoinj.crypto.HDPath;
+import org.bitcoinj.crypto.KeyCrypter;
+import org.bitcoinj.crypto.KeyCrypterException;
+import org.bitcoinj.crypto.KeyCrypterScrypt;
+import org.bitcoinj.script.Script;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.script.ScriptBuilder;
+import org.bitcoinj.script.ScriptChunk;
+import org.bitcoinj.script.ScriptException;
+import org.bitcoinj.script.ScriptExecution;
+import org.bitcoinj.script.ScriptPattern;
+import org.bitcoinj.signers.LocalTransactionSigner;
+import org.bitcoinj.signers.MissingSigResolutionSigner;
+import org.bitcoinj.signers.TransactionSigner;
+import org.bitcoinj.utils.BaseTaggableObject;
+import org.bitcoinj.base.internal.FutureUtils;
+import org.bitcoinj.utils.ListenerRegistration;
+import org.bitcoinj.utils.Threading;
+import org.bitcoinj.protobuf.wallet.Protos;
+import org.bitcoinj.wallet.WalletTransaction.Pool;
 import org.bitcoinj.wallet.listeners.CurrentKeyChangeEventListener;
 import org.bitcoinj.wallet.listeners.KeyChainEventListener;
 import org.bitcoinj.wallet.listeners.ScriptsChangeEventListener;
@@ -70,20 +96,49 @@ import org.bitcoinj.wallet.listeners.WalletChangeEventListener;
 import org.bitcoinj.wallet.listeners.WalletCoinsReceivedEventListener;
 import org.bitcoinj.wallet.listeners.WalletCoinsSentEventListener;
 import org.bitcoinj.wallet.listeners.WalletReorganizeEventListener;
-import org.slf4j.*;
-import org.bouncycastle.crypto.params.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import javax.annotation.*;
-import java.io.*;
+import org.jspecify.annotations.Nullable;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
-import java.util.concurrent.locks.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Random;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import static com.google.common.base.Preconditions.*;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 // To do list:
 //
@@ -119,13 +174,15 @@ import static com.google.common.base.Preconditions.*;
  * <p>Wallets can be serialized using protocol buffers. You need to save the wallet whenever it changes, there is an
  * auto-save feature that simplifies this for you although you're still responsible for manually triggering a save when
  * your app is about to quit because the auto-save feature waits a moment before actually committing to disk to avoid IO
- * thrashing when the wallet is changing very fast (eg due to a block chain sync). See
- * {@link Wallet#autosaveToFile(File, long, TimeUnit, WalletFiles.Listener)}
+ * thrashing when the wallet is changing very fast (e.g. due to a block chain sync). See
+ * {@link Wallet#autosaveToFile(File, Duration, WalletFiles.Listener)}
  * for more information about this.</p>
  */
 public class Wallet extends BaseTaggableObject
-    implements NewBestBlockListener, TransactionReceivedInBlockListener, PeerFilterProvider, KeyBag, TransactionBag, ReorganizeListener {
+    implements NewBestBlockListener, TransactionReceivedInBlockListener, PeerFilterProvider,
+        KeyBag, TransactionBag, ReorganizeListener, AddressParser {
     private static final Logger log = LoggerFactory.getLogger(Wallet.class);
+
     // Ordering: lock > keyChainGroupLock. KeyChainGroup is protected separately to allow fast querying of current receive address
     // even if the wallet itself is busy e.g. saving or processing a big reorg. Useful for reducing UI latency.
     protected final ReentrantLock lock = Threading.lock(Wallet.class);
@@ -162,7 +219,7 @@ public class Wallet extends BaseTaggableObject
 
     // All the TransactionOutput objects that we could spend (ignoring whether we have the private key or not).
     // Used to speed up various calculations.
-    protected final HashSet<TransactionOutput> myUnspents = new HashSet<>();
+    protected final Set<TransactionOutput> myUnspents = new HashSet<>();
 
     // Transactions that were dropped by the risk analysis system. These are not in any pools and not serialized
     // to disk. We have to keep them around because if we ignore a tx because we think it will never confirm, but
@@ -180,29 +237,31 @@ public class Wallet extends BaseTaggableObject
 
     // The key chain group is not thread safe, and generally the whole hierarchy of objects should not be mutated
     // outside the wallet lock. So don't expose this object directly via any accessors!
-    @GuardedBy("keyChainGroupLock") private KeyChainGroup keyChainGroup;
+    @GuardedBy("keyChainGroupLock") private final KeyChainGroup keyChainGroup;
 
     // A list of scripts watched by this wallet.
-    @GuardedBy("keyChainGroupLock") private Set<Script> watchedScripts;
+    @GuardedBy("keyChainGroupLock") private final Set<Script> watchedScripts;
 
-    protected final Context context;
+    protected final Network network;
     protected final NetworkParameters params;
+    private final AddressParser addressParser;
+
 
     @Nullable private Sha256Hash lastBlockSeenHash;
     private int lastBlockSeenHeight;
-    private long lastBlockSeenTimeSecs;
+    @Nullable private Instant lastBlockSeenTime;
 
-    private final CopyOnWriteArrayList<ListenerRegistration<WalletChangeEventListener>> changeListeners
+    private final List<ListenerRegistration<WalletChangeEventListener>> changeListeners
         = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<ListenerRegistration<WalletCoinsReceivedEventListener>> coinsReceivedListeners
+    private final List<ListenerRegistration<WalletCoinsReceivedEventListener>> coinsReceivedListeners
         = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<ListenerRegistration<WalletCoinsSentEventListener>> coinsSentListeners
+    private final List<ListenerRegistration<WalletCoinsSentEventListener>> coinsSentListeners
         = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<ListenerRegistration<WalletReorganizeEventListener>> reorganizeListeners
+    private final List<ListenerRegistration<WalletReorganizeEventListener>> reorganizeListeners
         = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<ListenerRegistration<ScriptsChangeEventListener>> scriptsChangeListeners
+    private final List<ListenerRegistration<ScriptsChangeEventListener>> scriptsChangeListeners
         = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<ListenerRegistration<TransactionConfidenceEventListener>> transactionConfidenceListeners
+    private final List<ListenerRegistration<TransactionConfidenceEventListener>> transactionConfidenceListeners
         = new CopyOnWriteArrayList<>();
 
     // A listener that relays confidence changes from the transaction confidence object to the wallet event listener,
@@ -212,8 +271,8 @@ public class Wallet extends BaseTaggableObject
     // If a TX hash appears in this set then notifyNewBestBlock will ignore it, as its confidence was already set up
     // in receive() via Transaction.setBlockAppearance(). As the BlockChain always calls notifyNewBestBlock even if
     // it sent transactions to the wallet, without this we'd double count.
-    private HashSet<Sha256Hash> ignoreNextNewBlock;
-    // Whether or not to ignore pending transactions that are considered risky by the configured risk analyzer.
+    private Set<Sha256Hash> ignoreNextNewBlock;
+    // Whether to ignore pending transactions that are considered risky by the configured risk analyzer.
     private boolean acceptRiskyTransactions;
     // Object that performs risk analysis of pending transactions. We might reject transactions that seem like
     // a high risk of being a double spending attack.
@@ -224,15 +283,17 @@ public class Wallet extends BaseTaggableObject
     // side effect of how the code is written (e.g. during re-orgs confidence data gets adjusted multiple times).
     private int onWalletChangedSuppressions;
     private boolean insideReorg;
-    private Map<Transaction, TransactionConfidence.Listener.ChangeReason> confidenceChanged;
+    private final Map<Transaction, TransactionConfidence.Listener.ChangeReason> confidenceChanged;
     protected volatile WalletFiles vFileManager;
     // Object that is used to send transactions asynchronously when the wallet requires it.
     protected volatile TransactionBroadcaster vTransactionBroadcaster;
-    // UNIX time in seconds. Money controlled by keys created before this time will be automatically respent to a key
+    // Money controlled by keys created before this time will be automatically respent to a key
     // that was created after it. Useful when you believe some keys have been compromised.
-    private volatile long vKeyRotationTimestamp;
+    // Null means no key rotation is configured.
+    @Nullable
+    private volatile Instant vKeyRotationTime = null;
 
-    protected final CoinSelector coinSelector = DefaultCoinSelector.get();
+    protected final CoinSelector coinSelector;
 
     // The wallet version. This is an int that can be used to track breaking changes in the wallet format.
     // You can also use it to detect wallets that come from the future (ie they contain features you
@@ -245,7 +306,7 @@ public class Wallet extends BaseTaggableObject
     private final HashMap<String, WalletExtension> extensions;
 
     // Objects that perform transaction signing. Applied subsequently one after another
-    @GuardedBy("lock") private volatile List<TransactionSigner> signers;
+    @GuardedBy("lock") private final List<TransactionSigner> signers;
 
     // If this is set then the wallet selects spendable candidate outputs from a UTXO provider.
     @Nullable private volatile UTXOProvider vUTXOProvider;
@@ -254,214 +315,195 @@ public class Wallet extends BaseTaggableObject
      * Creates a new, empty wallet with a randomly chosen seed and no transactions. Make sure to provide for sufficient
      * backup! Any keys will be derived from the seed. If you want to restore a wallet from disk instead, see
      * {@link #loadFromFile}.
-     * @param params network parameters
+     * @param network network wallet will operate on
      * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
+     * @return A new empty wallet
      */
-    public static Wallet createDeterministic(NetworkParameters params, Script.ScriptType outputScriptType) {
-        return createDeterministic(Context.getOrCreate(params), outputScriptType);
+    public static Wallet createDeterministic(Network network, ScriptType outputScriptType) {
+        return createDeterministic(network, outputScriptType, KeyChainGroupStructure.BIP32);
     }
 
     /**
      * Creates a new, empty wallet with a randomly chosen seed and no transactions. Make sure to provide for sufficient
      * backup! Any keys will be derived from the seed. If you want to restore a wallet from disk instead, see
      * {@link #loadFromFile}.
+     * @param network network wallet will operate on
      * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
+     * @param keyChainGroupStructure structure (e.g. BIP32 or BIP43)
+     * @return A new empty wallet
      */
-    public static Wallet createDeterministic(Context context, Script.ScriptType outputScriptType) {
-        return new Wallet(context, KeyChainGroup.builder(context.getParams()).fromRandom(outputScriptType).build());
-    }
-
-    /**
-     * Creates a new, empty wallet with a randomly chosen seed and no transactions. Make sure to provide for sufficient
-     * backup! Any keys will be derived from the seed. If you want to restore a wallet from disk instead, see
-     * {@link #loadFromFile}.
-     * @deprecated Use {@link #createDeterministic(Context, ScriptType)}
-     */
-    @Deprecated
-    @VisibleForTesting
-    protected Wallet(Context context) {
-        this(context, KeyChainGroup.builder(context.getParams()).fromRandom(Script.ScriptType.P2PKH).build());
+    public static Wallet createDeterministic(Network network, ScriptType outputScriptType, KeyChainGroupStructure keyChainGroupStructure) {
+        return new Wallet(network, KeyChainGroup.builder(network, keyChainGroupStructure).fromRandom(outputScriptType).build());
     }
 
     /**
      * Creates a new, empty wallet with just a basic keychain and no transactions. No deterministic chains will be created
      * automatically. This is meant for when you just want to import a few keys and operate on them.
-     * @param params network parameters
+     * @param network network wallet will operate on
      */
-    public static Wallet createBasic(NetworkParameters params) {
-        return new Wallet(params, KeyChainGroup.createBasic(params));
+    public static Wallet createBasic(Network network) {
+        return new Wallet(network, KeyChainGroup.createBasic(network));
     }
 
     /**
-     * @param params network parameters
+     * @param network network wallet will operate on
      * @param seed deterministic seed
      * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
      * @return a wallet from a deterministic seed with a default account path
      */
-    public static Wallet fromSeed(NetworkParameters params, DeterministicSeed seed,
-            Script.ScriptType outputScriptType) {
-        return fromSeed(params, seed, outputScriptType, KeyChainGroupStructure.DEFAULT);
+    public static Wallet fromSeed(Network network, DeterministicSeed seed,
+            ScriptType outputScriptType) {
+        return fromSeed(network, seed, outputScriptType, KeyChainGroupStructure.BIP32);
     }
 
     /**
-     * @param params network parameters
+     * @param network network wallet will operate on
      * @param seed deterministic seed
      * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
      * @param structure structure for your wallet
      * @return a wallet from a deterministic seed with a default account path
      */
-    public static Wallet fromSeed(NetworkParameters params, DeterministicSeed seed, Script.ScriptType outputScriptType,
+    public static Wallet fromSeed(Network network, DeterministicSeed seed, ScriptType outputScriptType,
             KeyChainGroupStructure structure) {
-        return new Wallet(params, KeyChainGroup.builder(params, structure).fromSeed(seed, outputScriptType).build());
+        return new Wallet(network, KeyChainGroup.builder(network, structure).fromSeed(seed, outputScriptType).build());
     }
 
     /**
-     * @param params network parameters
-     * @param seed deterministic seed
-     * @return a wallet from a deterministic seed with a
-     * {@link DeterministicKeyChain#ACCOUNT_ZERO_PATH 0 hardened path}
-     * @deprecated Use {@link #fromSeed(NetworkParameters, DeterministicSeed, ScriptType, KeyChainGroupStructure)}
-     */
-    @Deprecated
-    public static Wallet fromSeed(NetworkParameters params, DeterministicSeed seed) {
-        return fromSeed(params, seed, Script.ScriptType.P2PKH);
-    }
-
-    /**
-     * @param params network parameters
+     * @param network network wallet will operate on
      * @param seed deterministic seed
      * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
      * @param accountPath account path to generate receiving addresses on
      * @return an instance of a wallet from a deterministic seed.
      */
-    public static Wallet fromSeed(NetworkParameters params, DeterministicSeed seed, Script.ScriptType outputScriptType,
-            List<ChildNumber> accountPath) {
+    public static Wallet fromSeed(Network network, DeterministicSeed seed, ScriptType outputScriptType,
+            HDPath.HDPartialPath accountPath) {
         DeterministicKeyChain chain = DeterministicKeyChain.builder().seed(seed).outputScriptType(outputScriptType)
                 .accountPath(accountPath).build();
-        return new Wallet(params, KeyChainGroup.builder(params).addChain(chain).build());
-    }
-
-    /**
-     * @param params network parameters
-     * @param seed deterministic seed
-     * @param accountPath account path
-     * @return an instance of a wallet from a deterministic seed.
-     * @deprecated Use {@link #fromSeed(NetworkParameters, DeterministicSeed, ScriptType, List)}
-     */
-    @Deprecated
-    public static Wallet fromSeed(NetworkParameters params, DeterministicSeed seed, List<ChildNumber> accountPath) {
-        return fromSeed(params, seed, Script.ScriptType.P2PKH, accountPath);
+        return new Wallet(network, KeyChainGroup.builder(network).addChain(chain).build());
     }
 
     /**
      * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given watching key. This HAS
      * to be an account key as returned by {@link DeterministicKeyChain#getWatchingKey()}.
      */
-    public static Wallet fromWatchingKey(NetworkParameters params, DeterministicKey watchKey,
-            Script.ScriptType outputScriptType) {
+    public static Wallet fromWatchingKey(Network network, DeterministicKey watchKey,
+            ScriptType outputScriptType) {
         DeterministicKeyChain chain = DeterministicKeyChain.builder().watch(watchKey).outputScriptType(outputScriptType)
                 .build();
-        return new Wallet(params, KeyChainGroup.builder(params).addChain(chain).build());
-    }
-
-    /**
-     * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given watching key. This HAS
-     * to be an account key as returned by {@link DeterministicKeyChain#getWatchingKey()}.
-     * @deprecated Use {@link #fromWatchingKey(NetworkParameters, DeterministicKey, ScriptType)}
-     */
-    @Deprecated
-    public static Wallet fromWatchingKey(NetworkParameters params, DeterministicKey watchKey) {
-        return fromWatchingKey(params, watchKey, Script.ScriptType.P2PKH);
+        return new Wallet(network, KeyChainGroup.builder(network).addChain(chain).build());
     }
 
     /**
      * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given watching key. The
-     * account path is specified. The key is specified in base58 notation and the creation time of the key. If you don't
-     * know the creation time, you can pass {@link DeterministicHierarchy#BIP32_STANDARDISATION_TIME_SECS}.
+     * account path is specified.
+     * @param network network wallet will operate on
+     * @param watchKeyB58 The key in base58 notation
+     * @param creationTime creation time of the key (if unknown use {@link #fromWatchingKeyB58(Network, String)}
+     * @return a new wallet
      */
-    public static Wallet fromWatchingKeyB58(NetworkParameters params, String watchKeyB58, long creationTimeSeconds) {
-        final DeterministicKey watchKey = DeterministicKey.deserializeB58(null, watchKeyB58, params);
-        watchKey.setCreationTimeSeconds(creationTimeSeconds);
-        return fromWatchingKey(params, watchKey, outputScriptTypeFromB58(params, watchKeyB58));
+    public static Wallet fromWatchingKeyB58(Network network, String watchKeyB58, Instant creationTime) {
+        final DeterministicKey watchKey = DeterministicKey.deserializeB58(null, watchKeyB58, network);
+        watchKey.setCreationTime(creationTime);
+        return fromWatchingKey(network, watchKey, outputScriptTypeFromB58(NetworkParameters.of(network), watchKeyB58));
+    }
+
+    /**
+     * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given watching key. The
+     * account path is specified. The key's creation time will be set to {@link DeterministicHierarchy#BIP32_STANDARDISATION_TIME}
+     * @param network network wallet will operate on
+     * @param watchKeyB58 The key in base58 notation
+     * @return a new wallet
+     */
+    public static Wallet fromWatchingKeyB58(Network network, String watchKeyB58) {
+        return fromWatchingKeyB58(network, watchKeyB58, DeterministicHierarchy.BIP32_STANDARDISATION_TIME);
     }
 
     /**
      * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given spending key. This HAS
      * to be an account key as returned by {@link DeterministicKeyChain#getWatchingKey()}. This wallet can also spend.
+     * @param network network wallet will operate on
      */
-    public static Wallet fromSpendingKey(NetworkParameters params, DeterministicKey spendKey,
-            Script.ScriptType outputScriptType) {
+    public static Wallet fromSpendingKey(Network network, DeterministicKey spendKey,
+            ScriptType outputScriptType) {
         DeterministicKeyChain chain = DeterministicKeyChain.builder().spend(spendKey).outputScriptType(outputScriptType)
                 .build();
-        return new Wallet(params, KeyChainGroup.builder(params).addChain(chain).build());
-    }
-
-    /**
-     * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given spending key. This HAS
-     * to be an account key as returned by {@link DeterministicKeyChain#getWatchingKey()}. This wallet can also spend.
-     * @deprecated Use {@link #fromSpendingKey(NetworkParameters, DeterministicKey, ScriptType)}
-     */
-    @Deprecated
-    public static Wallet fromSpendingKey(NetworkParameters params, DeterministicKey spendKey) {
-        return fromSpendingKey(params, spendKey, Script.ScriptType.P2PKH);
+        return new Wallet(network, KeyChainGroup.builder(network).addChain(chain).build());
     }
 
     /**
      * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given spending key.
-     * The key is specified in base58 notation and the creation time of the key. If you don't know the creation time,
-     * you can pass {@link DeterministicHierarchy#BIP32_STANDARDISATION_TIME_SECS}.
+     * @param network network wallet will operate on
+     * @param spendingKeyB58 The key in base58 notation
+     * @param creationTime creation time of the key (if unknown use {@link #fromWatchingKeyB58(Network, String)}
+     * @return a new wallet
      */
-    public static Wallet fromSpendingKeyB58(NetworkParameters params, String spendingKeyB58, long creationTimeSeconds) {
-        final DeterministicKey spendKey = DeterministicKey.deserializeB58(null, spendingKeyB58, params);
-        spendKey.setCreationTimeSeconds(creationTimeSeconds);
-        return fromSpendingKey(params, spendKey, outputScriptTypeFromB58(params, spendingKeyB58));
+    public static Wallet fromSpendingKeyB58(Network network, String spendingKeyB58, Instant creationTime) {
+        final DeterministicKey spendKey = DeterministicKey.deserializeB58(null, spendingKeyB58, network);
+        spendKey.setCreationTime(creationTime);
+        return fromSpendingKey(network, spendKey, outputScriptTypeFromB58(NetworkParameters.of(network), spendingKeyB58));
     }
 
     /**
-     * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given spending key. This HAS
-     * to be an account key as returned by {@link DeterministicKeyChain#getWatchingKey()}.
+     * Creates a wallet that tracks payments to and from the HD key hierarchy rooted by the given spending key.
+     * The key's creation time will be set to {@link DeterministicHierarchy#BIP32_STANDARDISATION_TIME}.
+     * @param network network wallet will operate on
+     * @param spendingKeyB58 The key in base58 notation
+     * @return a new wallet
      */
-    public static Wallet fromMasterKey(NetworkParameters params, DeterministicKey masterKey,
-            Script.ScriptType outputScriptType, ChildNumber accountNumber) {
+    public static Wallet fromSpendingKeyB58(Network network, String spendingKeyB58) {
+        return fromSpendingKeyB58(network, spendingKeyB58, DeterministicHierarchy.BIP32_STANDARDISATION_TIME);
+    }
+
+    /**
+     * Creates a spending wallet that tracks payments to and from a BIP32-style HD key hierarchy rooted by {@code masterKey} and
+     * {@code accountNumber}. The account path must be directly below the master key as in BIP-32.
+     * <p>
+     * This method should not be used for BIP-43 compliant wallets or accounts not of the form {@code m/accountNumber'}.
+     * <p>
+     * This wallet will not store the {@code masterKey}, only the account key.
+     * @param network network the wallet will operate on
+     * @param masterKey root private key (e.g. path {@code m})
+     * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
+     * @param accountNumber account number to append, resulting in an account path of {@code m/accountNumber'}
+     * @return newly created Wallet object
+     */
+    public static Wallet fromMasterKey(Network network, DeterministicKey masterKey,
+                                       ScriptType outputScriptType, ChildNumber accountNumber) {
         DeterministicKey accountKey = HDKeyDerivation.deriveChildKey(masterKey, accountNumber);
-        accountKey = accountKey.dropParent();
-        accountKey.setCreationTimeSeconds(masterKey.getCreationTimeSeconds());
+        accountKey = accountKey.withoutParent();   // Drop the parent private key, so it won't be used or saved.
+        Optional<Instant> creationTime = masterKey.getCreationTime();
+        if (creationTime.isPresent())
+            accountKey.setCreationTime(creationTime.get());
+        else
+            accountKey.clearCreationTime();
         DeterministicKeyChain chain = DeterministicKeyChain.builder().spend(accountKey)
                 .outputScriptType(outputScriptType).build();
-        return new Wallet(params, KeyChainGroup.builder(params).addChain(chain).build());
+        return new Wallet(network, KeyChainGroup.builder(network).addChain(chain).build());
     }
 
-    /**
-     * @deprecated Use {@link #createBasic(NetworkParameters)}, then {@link #importKeys(List)}.
-     */
-    @Deprecated
-    public static Wallet fromKeys(NetworkParameters params, List<ECKey> keys) {
-        for (ECKey key : keys)
-            checkArgument(!(key instanceof DeterministicKey));
-
-        KeyChainGroup group = KeyChainGroup.builder(params).build();
-        group.importKeys(keys);
-        return new Wallet(params, group);
-    }
-
-    private static Script.ScriptType outputScriptTypeFromB58(NetworkParameters params, String base58) {
+    private static ScriptType outputScriptTypeFromB58(NetworkParameters params, String base58) {
         int header = ByteBuffer.wrap(Base58.decodeChecked(base58)).getInt();
         if (header == params.getBip32HeaderP2PKHpub() || header == params.getBip32HeaderP2PKHpriv())
-            return Script.ScriptType.P2PKH;
+            return ScriptType.P2PKH;
         else if (header == params.getBip32HeaderP2WPKHpub() || header == params.getBip32HeaderP2WPKHpriv())
-            return Script.ScriptType.P2WPKH;
+            return ScriptType.P2WPKH;
         else
             throw new IllegalArgumentException(base58.substring(0, 4));
     }
 
-    public Wallet(NetworkParameters params, KeyChainGroup keyChainGroup) {
-        this(Context.getOrCreate(params), keyChainGroup);
-    }
-
-    private Wallet(Context context, KeyChainGroup keyChainGroup) {
-        this.context = checkNotNull(context);
-        this.params = checkNotNull(context.getParams());
-        this.keyChainGroup = checkNotNull(keyChainGroup);
+    /**
+     * Creates a new, empty wallet with no transactions. If you haven't already done so,
+     * make sure to provide for sufficient backup of the keys in the {@link KeyChainGroup}.
+     * To restore a wallet from disk instead, see {@link #loadFromFile}.
+     * @param network network wallet will operate on
+     * @param keyChainGroup keychain group to manage keychains
+     */
+    public Wallet(Network network, KeyChainGroup keyChainGroup) {
+        this.network = Objects.requireNonNull(network);
+        this.params = NetworkParameters.of(network);
+        this.addressParser = AddressParser.getDefault(network);
+        this.coinSelector = DefaultCoinSelector.get(network);
+        this.keyChainGroup = Objects.requireNonNull(keyChainGroup);
         watchedScripts = new HashSet<>();
         unspent = new HashMap<>();
         spent = new HashMap<>();
@@ -488,7 +530,7 @@ public class Wallet extends BaseTaggableObject
             if (reason == Listener.ChangeReason.SEEN_PEERS) {
                 lock.lock();
                 try {
-                    checkBalanceFuturesLocked(null);
+                    checkBalanceFuturesLocked();
                     Transaction tx = getTransaction(confidence.getTransactionHash());
                     queueOnTransactionConfidenceChanged(tx);
                     maybeQueueOnWalletChanged();
@@ -500,18 +542,29 @@ public class Wallet extends BaseTaggableObject
         acceptRiskyTransactions = false;
     }
 
-    public NetworkParameters getNetworkParameters() {
-        return params;
+    public Network network() {
+        return network;
     }
 
     /**
-     * Gets the active keychains via {@link KeyChainGroup#getActiveKeyChains(long)}.
+     * Parse an address string using all formats this wallet knows about for the wallet's network type
+     * @param addressString Address string to parse
+     * @return A validated address
+     * @throws AddressFormatException if invalid string
+     */
+    @Override
+    public Address parseAddress(String addressString) throws AddressFormatException {
+        return addressParser.parseAddress(addressString);
+    }
+
+    /**
+     * Gets the active keychains via {@link KeyChainGroup#getActiveKeyChains(Instant)}.
      */
     public List<DeterministicKeyChain> getActiveKeyChains() {
         keyChainGroupLock.lock();
         try {
-            long keyRotationTimeSecs = vKeyRotationTimestamp;
-            return keyChainGroup.getActiveKeyChains(keyRotationTimeSecs);
+            Instant keyRotationTime = vKeyRotationTime;
+            return keyChainGroup.getActiveKeyChains(keyRotationTime);
         } finally {
             keyChainGroupLock.unlock();
         }
@@ -550,7 +603,7 @@ public class Wallet extends BaseTaggableObject
     public List<TransactionSigner> getTransactionSigners() {
         lock.lock();
         try {
-            return ImmutableList.copyOf(signers);
+            return Collections.unmodifiableList(signers);
         } finally {
             lock.unlock();
         }
@@ -670,17 +723,17 @@ public class Wallet extends BaseTaggableObject
     }
 
     /**
-     * <p>Returns a fresh receive address for a given {@link Script.ScriptType}.</p>
+     * <p>Returns a fresh receive address for a given {@link ScriptType}.</p>
      * <p>This method is meant for when you really need a fallback address. Normally, you should be
      * using {@link #freshAddress(KeyChain.KeyPurpose)} or
      * {@link #currentAddress(KeyChain.KeyPurpose)}.</p>
      */
-    public Address freshReceiveAddress(Script.ScriptType scriptType) {
+    public Address freshReceiveAddress(ScriptType scriptType) {
         Address address;
         keyChainGroupLock.lock();
         try {
-            long keyRotationTimeSecs = vKeyRotationTimestamp;
-            address = keyChainGroup.freshAddress(KeyChain.KeyPurpose.RECEIVE_FUNDS, scriptType, keyRotationTimeSecs);
+            Instant keyRotationTime = vKeyRotationTime;
+            address = keyChainGroup.freshAddress(KeyChain.KeyPurpose.RECEIVE_FUNDS, scriptType, keyRotationTime);
         } finally {
             keyChainGroupLock.unlock();
         }
@@ -696,8 +749,8 @@ public class Wallet extends BaseTaggableObject
         keyChainGroupLock.lock();
         try {
             List<ECKey> keys = new LinkedList<>();
-            long keyRotationTimeSecs = vKeyRotationTimestamp;
-            for (final DeterministicKeyChain chain : keyChainGroup.getActiveKeyChains(keyRotationTimeSecs))
+            Instant keyRotationTime = vKeyRotationTime;
+            for (final DeterministicKeyChain chain : keyChainGroup.getActiveKeyChains(keyRotationTime))
                 keys.addAll(chain.getIssuedReceiveKeys());
             return keys;
         } finally {
@@ -713,11 +766,11 @@ public class Wallet extends BaseTaggableObject
         keyChainGroupLock.lock();
         try {
             List<Address> addresses = new ArrayList<>();
-            long keyRotationTimeSecs = vKeyRotationTimestamp;
-            for (final DeterministicKeyChain chain : keyChainGroup.getActiveKeyChains(keyRotationTimeSecs)) {
-                Script.ScriptType outputScriptType = chain.getOutputScriptType();
+            Instant keyRotationTime = vKeyRotationTime;
+            for (final DeterministicKeyChain chain : keyChainGroup.getActiveKeyChains(keyRotationTime)) {
+                ScriptType outputScriptType = chain.getOutputScriptType();
                 for (ECKey key : chain.getIssuedReceiveKeys())
-                    addresses.add(Address.fromKey(getParams(), key, outputScriptType));
+                    addresses.add(key.toAddress(outputScriptType, network()));
             }
             return addresses;
         } finally {
@@ -725,12 +778,6 @@ public class Wallet extends BaseTaggableObject
         }
     }
 
-    /** @deprecated Use {@link #upgradeToDeterministic(ScriptType, KeyParameter)} */
-    @Deprecated
-    public void upgradeToDeterministic(@Nullable KeyParameter aesKey) {
-        upgradeToDeterministic(Script.ScriptType.P2PKH, aesKey);
-    }
-
     /**
      * Upgrades the wallet to be deterministic (BIP32). You should call this, possibly providing the users encryption
      * key, after loading a wallet produced by previous versions of bitcoinj. If the wallet is encrypted the key
@@ -738,9 +785,9 @@ public class Wallet extends BaseTaggableObject
      * to do this will result in an exception being thrown. For non-encrypted wallets, the upgrade will be done for
      * you automatically the first time a new key is requested (this happens when spending due to the change address).
      */
-    public void upgradeToDeterministic(Script.ScriptType outputScriptType, @Nullable KeyParameter aesKey)
+    public void upgradeToDeterministic(ScriptType outputScriptType, @Nullable AesKey aesKey)
             throws DeterministicUpgradeRequiresPassword {
-        upgradeToDeterministic(outputScriptType, KeyChainGroupStructure.DEFAULT, aesKey);
+        upgradeToDeterministic(outputScriptType, KeyChainGroupStructure.BIP32, aesKey);
     }
 
     /**
@@ -750,33 +797,27 @@ public class Wallet extends BaseTaggableObject
      * to do this will result in an exception being thrown. For non-encrypted wallets, the upgrade will be done for
      * you automatically the first time a new key is requested (this happens when spending due to the change address).
      */
-    public void upgradeToDeterministic(Script.ScriptType outputScriptType, KeyChainGroupStructure structure,
-            @Nullable KeyParameter aesKey) throws DeterministicUpgradeRequiresPassword {
+    public void upgradeToDeterministic(ScriptType outputScriptType, KeyChainGroupStructure structure,
+                                       @Nullable AesKey aesKey) throws DeterministicUpgradeRequiresPassword {
         keyChainGroupLock.lock();
         try {
-            long keyRotationTimeSecs = vKeyRotationTimestamp;
-            keyChainGroup.upgradeToDeterministic(outputScriptType, structure, keyRotationTimeSecs, aesKey);
+            Instant keyRotationTime = vKeyRotationTime;
+            keyChainGroup.upgradeToDeterministic(outputScriptType, structure, keyRotationTime, aesKey);
         } finally {
             keyChainGroupLock.unlock();
         }
     }
 
-    /** @deprecated Use {@link #isDeterministicUpgradeRequired(ScriptType)} */
-    @Deprecated
-    public boolean isDeterministicUpgradeRequired() {
-        return isDeterministicUpgradeRequired(Script.ScriptType.P2PKH);
-    }
-
     /**
      * Returns true if the wallet contains random keys and no HD chains, in which case you should call
-     * {@link #upgradeToDeterministic(ScriptType, KeyParameter)} before attempting to do anything
+     * {@link #upgradeToDeterministic(ScriptType, AesKey)} before attempting to do anything
      * that would require a new address or key.
      */
-    public boolean isDeterministicUpgradeRequired(Script.ScriptType outputScriptType) {
+    public boolean isDeterministicUpgradeRequired(ScriptType outputScriptType) {
         keyChainGroupLock.lock();
         try {
-            long keyRotationTimeSecs = vKeyRotationTimestamp;
-            return keyChainGroup.isDeterministicUpgradeRequired(outputScriptType, keyRotationTimeSecs);
+            Instant keyRotationTime = vKeyRotationTime;
+            return keyChainGroup.isDeterministicUpgradeRequired(outputScriptType, keyRotationTime);
         } finally {
             keyChainGroupLock.unlock();
         }
@@ -854,12 +895,12 @@ public class Wallet extends BaseTaggableObject
      * handler. If the key already exists in the wallet, does nothing and returns false.</p>
      */
     public boolean importKey(ECKey key) {
-        return importKeys(Lists.newArrayList(key)) == 1;
+        return importKeys(Collections.singletonList(key)) == 1;
     }
 
     /**
      * Imports the given keys to the wallet.
-     * If {@link Wallet#autosaveToFile(File, long, TimeUnit, WalletFiles.Listener)}
+     * If {@link Wallet#autosaveToFile(File, Duration, WalletFiles.Listener)}
      * has been called, triggers an auto save bypassing the normal coalescing delay and event handlers.
      * Returns the number of keys added, after duplicates are ignored. The onKeyAdded event will be called for each key
      * in the list that was not already present.
@@ -889,7 +930,7 @@ public class Wallet extends BaseTaggableObject
     public int importKeysAndEncrypt(final List<ECKey> keys, CharSequence password) {
         keyChainGroupLock.lock();
         try {
-            checkNotNull(getKeyCrypter(), "Wallet is not encrypted");
+            Objects.requireNonNull(getKeyCrypter(), "Wallet is not encrypted");
             return importKeysAndEncrypt(keys, getKeyCrypter().deriveKey(password));
         } finally {
             keyChainGroupLock.unlock();
@@ -897,7 +938,7 @@ public class Wallet extends BaseTaggableObject
     }
 
     /** Takes a list of keys and an AES key, then encrypts and imports them in one step using the current keycrypter. */
-    public int importKeysAndEncrypt(final List<ECKey> keys, KeyParameter aesKey) {
+    public int importKeysAndEncrypt(final List<ECKey> keys, AesKey aesKey) {
         keyChainGroupLock.lock();
         try {
             checkNoDeterministicKeys(keys);
@@ -909,14 +950,7 @@ public class Wallet extends BaseTaggableObject
 
     /**
      * Add a pre-configured keychain to the wallet.  Useful for setting up a complex keychain,
-     * such as for a married wallet.  For example:
-     * {@code
-     * MarriedKeyChain chain = MarriedKeyChain.builder()
-     *     .random(new SecureRandom())
-     *     .followingKeys(followingKeys)
-     *     .threshold(2).build();
-     * wallet.addAndActivateHDChain(chain);
-     * }
+     * such as for a married wallet (which is not supported any more).
      */
     public void addAndActivateHDChain(DeterministicKeyChain chain) {
         keyChainGroupLock.lock();
@@ -987,38 +1021,51 @@ public class Wallet extends BaseTaggableObject
     }
 
     /**
-     * Same as {@link #addWatchedAddress(Address, long)} with the current time as the creation time.
+     * Same as {@link #addWatchedAddress(Address, Instant)} with the current time as the creation time.
      */
     public boolean addWatchedAddress(final Address address) {
-        long now = Utils.currentTimeSeconds();
-        return addWatchedAddresses(Lists.newArrayList(address), now) == 1;
+        Instant now = TimeUtils.currentTime();
+        return addWatchedAddresses(Collections.singletonList(address), now) == 1;
     }
 
     /**
      * Adds the given address to the wallet to be watched. Outputs can be retrieved by {@link #getWatchedOutputs(boolean)}.
      *
-     * @param creationTime creation time in seconds since the epoch, for scanning the blockchain
+     * @param creationTime creation time, for scanning the blockchain
      * @return whether the address was added successfully (not already present)
      */
-    public boolean addWatchedAddress(final Address address, long creationTime) {
-        return addWatchedAddresses(Lists.newArrayList(address), creationTime) == 1;
+    public boolean addWatchedAddress(final Address address, Instant creationTime) {
+        return addWatchedAddresses(Collections.singletonList(address), creationTime) == 1;
     }
 
     /**
-     * Adds the given address to the wallet to be watched. Outputs can be retrieved
+     * Adds the given addresses to the wallet to be watched. Outputs can be retrieved
      * by {@link #getWatchedOutputs(boolean)}.
-     *
+     * @param addresses addresses to be watched
+     * @param creationTime creation time of the addresses
      * @return how many addresses were added successfully
      */
-    public int addWatchedAddresses(final List<Address> addresses, long creationTime) {
+    public int addWatchedAddresses(final List<Address> addresses, Instant creationTime) {
         List<Script> scripts = new ArrayList<>();
-
         for (Address address : addresses) {
-            Script script = ScriptBuilder.createOutputScript(address);
-            script.setCreationTimeSeconds(creationTime);
+            Script script = ScriptBuilder.createOutputScript(address, creationTime);
             scripts.add(script);
         }
+        return addWatchedScripts(scripts);
+    }
 
+    /**
+     * Adds the given addresses to the wallet to be watched. Outputs can be retrieved
+     * by {@link #getWatchedOutputs(boolean)}. Use this if the creation time of the addresses is unknown.
+     * @param addresses addresses to be watched
+     * @return how many addresses were added successfully
+     */
+    public int addWatchedAddresses(final List<Address> addresses) {
+        List<Script> scripts = new ArrayList<>();
+        for (Address address : addresses) {
+            Script script = ScriptBuilder.createOutputScript(address);
+            scripts.add(script);
+        }
         return addWatchedScripts(scripts);
     }
 
@@ -1040,7 +1087,7 @@ public class Wallet extends BaseTaggableObject
                 // a script in the wallet with an incorrect creation time.
                 if (watchedScripts.contains(script))
                     watchedScripts.remove(script);
-                if (script.getCreationTimeSeconds() == 0)
+                if (!script.creationTime().isPresent())
                     log.warn("Adding a script to the wallet with a creation time of zero, this will disable the checkpointing optimization!    {}", script);
                 watchedScripts.add(script);
                 added++;
@@ -1061,7 +1108,7 @@ public class Wallet extends BaseTaggableObject
      * @return true if successful
      */
     public boolean removeWatchedAddress(final Address address) {
-        return removeWatchedAddresses(ImmutableList.of(address));
+        return removeWatchedAddresses(Collections.singletonList(address));
     }
 
     /**
@@ -1112,17 +1159,11 @@ public class Wallet extends BaseTaggableObject
             List<Address> addresses = new LinkedList<>();
             for (Script script : watchedScripts)
                 if (ScriptPattern.isP2PKH(script))
-                    addresses.add(script.getToAddress(params));
+                    addresses.add(script.getToAddress(network));
             return addresses;
         } finally {
             keyChainGroupLock.unlock();
         }
-    }
-
-    /** @deprecated Use {@link #findKeyFromPubKeyHash(byte[], ScriptType)} */
-    @Deprecated
-    public ECKey findKeyFromPubHash(byte[] pubKeyHash) {
-        return findKeyFromPubKeyHash(pubKeyHash, Script.ScriptType.P2PKH);
     }
 
     /**
@@ -1133,7 +1174,7 @@ public class Wallet extends BaseTaggableObject
      */
     @Override
     @Nullable
-    public ECKey findKeyFromPubKeyHash(byte[] pubKeyHash, @Nullable Script.ScriptType scriptType) {
+    public ECKey findKeyFromPubKeyHash(byte[] pubKeyHash, @Nullable ScriptType scriptType) {
         keyChainGroupLock.lock();
         try {
             return keyChainGroup.findKeyFromPubKeyHash(pubKeyHash, scriptType);
@@ -1167,14 +1208,8 @@ public class Wallet extends BaseTaggableObject
             throw new IllegalArgumentException(address.toString());
     }
 
-    /** @deprecated Use {@link #isPubKeyHashMine(byte[], ScriptType)} */
-    @Deprecated
-    public boolean isPubKeyHashMine(byte[] pubKeyHash) {
-        return isPubKeyHashMine(pubKeyHash, Script.ScriptType.P2PKH);
-    }
-
     @Override
-    public boolean isPubKeyHashMine(byte[] pubKeyHash, @Nullable Script.ScriptType scriptType) {
+    public boolean isPubKeyHashMine(byte[] pubKeyHash, @Nullable ScriptType scriptType) {
         return findKeyFromPubKeyHash(pubKeyHash, scriptType) != null;
     }
 
@@ -1257,7 +1292,7 @@ public class Wallet extends BaseTaggableObject
                         byte[] pubkeyHash = ScriptPattern.extractHashFromP2PKH(script);
                         keyChainGroup.markPubKeyHashAsUsed(pubkeyHash);
                     } else if (ScriptPattern.isP2SH(script)) {
-                        LegacyAddress a = LegacyAddress.fromScriptHash(tx.getParams(),
+                        LegacyAddress a = LegacyAddress.fromScriptHash(network(),
                                 ScriptPattern.extractHashFromP2SH(script));
                         keyChainGroup.markP2SHAddressAsUsed(a);
                     } else if (ScriptPattern.isP2WH(script)) {
@@ -1276,7 +1311,7 @@ public class Wallet extends BaseTaggableObject
 
     /**
      * Returns the immutable seed for the current active HD chain.
-     * @throws org.bitcoinj.core.ECKey.MissingPrivateKeyException if the seed is unavailable (watching wallet)
+     * @throws ECKey.MissingPrivateKeyException if the seed is unavailable (watching wallet)
      */
     public DeterministicSeed getKeyChainSeed() {
         keyChainGroupLock.lock();
@@ -1294,7 +1329,7 @@ public class Wallet extends BaseTaggableObject
      * Returns a key for the given HD path, assuming it's already been derived. You normally shouldn't use this:
      * use currentReceiveKey/freshReceiveKey instead.
      */
-    public DeterministicKey getKeyByPath(List<ChildNumber> path) {
+    public DeterministicKey getKeyByPath(HDPath.HDPartialPath path) {
         keyChainGroupLock.lock();
         try {
             return keyChainGroup.getActiveKeyChain().getKeyByPath(path, false);
@@ -1305,7 +1340,7 @@ public class Wallet extends BaseTaggableObject
 
     /**
      * Convenience wrapper around {@link Wallet#encrypt(KeyCrypter,
-     * org.bouncycastle.crypto.params.KeyParameter)} which uses the default Scrypt key derivation algorithm and
+     * AesKey)} which uses the default Scrypt key derivation algorithm and
      * parameters to derive a key from the given password.
      */
     public void encrypt(CharSequence password) {
@@ -1327,7 +1362,7 @@ public class Wallet extends BaseTaggableObject
      * @param aesKey AES key to use (normally created using KeyCrypter#deriveKey and cached as it is time consuming to create from a password)
      * @throws KeyCrypterException Thrown if the wallet encryption fails. If so, the wallet state is unchanged.
      */
-    public void encrypt(KeyCrypter keyCrypter, KeyParameter aesKey) {
+    public void encrypt(KeyCrypter keyCrypter, AesKey aesKey) {
         keyChainGroupLock.lock();
         try {
             keyChainGroup.encrypt(keyCrypter, aesKey);
@@ -1346,7 +1381,8 @@ public class Wallet extends BaseTaggableObject
         keyChainGroupLock.lock();
         try {
             final KeyCrypter crypter = keyChainGroup.getKeyCrypter();
-            checkState(crypter != null, "Not encrypted");
+            checkState(crypter != null, () ->
+                    "not encrypted");
             keyChainGroup.decrypt(crypter.deriveKey(password));
         } catch (KeyCrypterException.InvalidCipherText | KeyCrypterException.PublicPrivateMismatch e) {
             throw new BadWalletEncryptionKeyException(e);
@@ -1363,7 +1399,7 @@ public class Wallet extends BaseTaggableObject
      * @throws BadWalletEncryptionKeyException Thrown if the given aesKey is wrong. If so, the wallet state is unchanged.
      * @throws KeyCrypterException Thrown if the wallet decryption fails. If so, the wallet state is unchanged.
      */
-    public void decrypt(KeyParameter aesKey) throws BadWalletEncryptionKeyException {
+    public void decrypt(AesKey aesKey) throws BadWalletEncryptionKeyException {
         keyChainGroupLock.lock();
         try {
             keyChainGroup.decrypt(aesKey);
@@ -1396,7 +1432,7 @@ public class Wallet extends BaseTaggableObject
      *
      *  @return boolean true if AES key supplied can decrypt the first encrypted private key in the wallet, false otherwise.
      */
-    public boolean checkAESKey(KeyParameter aesKey) {
+    public boolean checkAESKey(AesKey aesKey) {
         keyChainGroupLock.lock();
         try {
             return keyChainGroup.checkAESKey(aesKey);
@@ -1424,14 +1460,14 @@ public class Wallet extends BaseTaggableObject
      *
      * (This is a convenience method - the encryption type is actually stored in the keyCrypter).
      */
-    public EncryptionType getEncryptionType() {
+    public KeyCrypter.EncryptionType getEncryptionType() {
         keyChainGroupLock.lock();
         try {
             KeyCrypter crypter = keyChainGroup.getKeyCrypter();
             if (crypter != null)
                 return crypter.getUnderstoodEncryptionType();
             else
-                return EncryptionType.UNENCRYPTED;
+                return KeyCrypter.EncryptionType.UNENCRYPTED;
         } finally {
             keyChainGroupLock.unlock();
         }
@@ -1439,7 +1475,7 @@ public class Wallet extends BaseTaggableObject
 
     /** Returns true if the wallet is encrypted using any scheme, false if not. */
     public boolean isEncrypted() {
-        return getEncryptionType() != EncryptionType.UNENCRYPTED;
+        return getEncryptionType() != KeyCrypter.EncryptionType.UNENCRYPTED;
     }
 
     /**
@@ -1462,7 +1498,7 @@ public class Wallet extends BaseTaggableObject
      * @throws BadWalletEncryptionKeyException Thrown if the given currentAesKey is wrong. If so, the wallet state is unchanged.
      * @throws KeyCrypterException Thrown if the wallet decryption fails. If so, the wallet state is unchanged.
      */
-    public void changeEncryptionKey(KeyCrypter keyCrypter, KeyParameter currentAesKey, KeyParameter newAesKey) throws BadWalletEncryptionKeyException {
+    public void changeEncryptionKey(KeyCrypter keyCrypter, AesKey currentAesKey, AesKey newAesKey) throws BadWalletEncryptionKeyException {
         keyChainGroupLock.lock();
         try {
             decrypt(currentAesKey);
@@ -1478,9 +1514,13 @@ public class Wallet extends BaseTaggableObject
 
     //region Serialization support
 
-    // TODO: Make this package private once the classes finish moving around.
-    /** Internal use only. */
+    @Deprecated
     public List<Protos.Key> serializeKeyChainGroupToProtobuf() {
+        return serializeKeyChainGroupToProtobufInternal();
+    }
+
+    /** Internal use only. */
+    List<Protos.Key> serializeKeyChainGroupToProtobufInternal() {
         keyChainGroupLock.lock();
         try {
             return keyChainGroup.serializeToProtobuf();
@@ -1489,12 +1529,28 @@ public class Wallet extends BaseTaggableObject
         }
     }
 
-    /** Saves the wallet first to the given temp file, then renames to the dest file. */
-    public void saveToFile(File temp, File destFile) throws IOException {
+    /**
+     * Saves the wallet first to the given temporary file, then renames to the destination file. This is done to make
+     * the save an atomic operation.
+     *
+     * @param tempFile temporary file to use for saving the wallet
+     * @param destFile file to save the wallet to
+     * @throws FileNotFoundException if directory doesn't exist
+     * @throws IOException           if an error occurs while saving
+     */
+    public void saveToFile(File tempFile, File destFile) throws IOException {
+        File tempParentFile = tempFile.getAbsoluteFile().getParentFile();
+        if (!tempParentFile.exists()) {
+            throw new FileNotFoundException(tempParentFile.getPath() + " (wallet directory not found)");
+        }
+        File destParentFile = destFile.getAbsoluteFile().getParentFile();
+        if (!destParentFile.exists()) {
+            throw new FileNotFoundException(destParentFile.getPath() + " (wallet directory not found)");
+        }
         FileOutputStream stream = null;
         lock.lock();
         try {
-            stream = new FileOutputStream(temp);
+            stream = new FileOutputStream(tempFile);
             saveToFileStream(stream);
             // Attempt to force the bits to hit the disk. In reality the OS or hard disk itself may still decide
             // to not write through to physical media for at least a few seconds, but this is the best we can do.
@@ -1502,16 +1558,16 @@ public class Wallet extends BaseTaggableObject
             stream.getFD().sync();
             stream.close();
             stream = null;
-            if (Utils.isWindows()) {
+            if (PlatformUtils.isWindows()) {
                 // Work around an issue on Windows whereby you can't rename over existing files.
                 File canonical = destFile.getCanonicalFile();
                 if (canonical.exists() && !canonical.delete())
                     throw new IOException("Failed to delete canonical wallet file for replacement with autosave");
-                if (temp.renameTo(canonical))
+                if (tempFile.renameTo(canonical))
                     return;  // else fall through.
-                throw new IOException("Failed to rename " + temp + " to " + canonical);
-            } else if (!temp.renameTo(destFile)) {
-                throw new IOException("Failed to rename " + temp + " to " + destFile);
+                throw new IOException("Failed to rename " + tempFile + " to " + canonical);
+            } else if (!tempFile.renameTo(destFile)) {
+                throw new IOException("Failed to rename " + tempFile + " to " + destFile);
             }
         } catch (RuntimeException e) {
             log.error("Failed whilst saving wallet", e);
@@ -1521,7 +1577,7 @@ public class Wallet extends BaseTaggableObject
             if (stream != null) {
                 stream.close();
             }
-            if (temp.exists()) {
+            if (tempFile.exists()) {
                 log.warn("Temp file still exists after failed save.");
             }
         }
@@ -1531,9 +1587,15 @@ public class Wallet extends BaseTaggableObject
      * Uses protobuf serialization to save the wallet to the given file. To learn more about this file format, see
      * {@link WalletProtobufSerializer}. Writes out first to a temporary file in the same directory and then renames
      * once written.
+     * @param f File to save wallet
+     * @throws FileNotFoundException if directory doesn't exist
+     * @throws IOException if an error occurs while saving
      */
     public void saveToFile(File f) throws IOException {
         File directory = f.getAbsoluteFile().getParentFile();
+        if (!directory.exists()) {
+            throw new FileNotFoundException(directory.getPath() + " (wallet directory not found)");
+        }
         File temp = File.createTempFile("wallet", null, directory);
         saveToFile(temp, f);
     }
@@ -1577,7 +1639,7 @@ public class Wallet extends BaseTaggableObject
     public void setRiskAnalyzer(RiskAnalysis.Analyzer analyzer) {
         lock.lock();
         try {
-            this.riskAnalyzer = checkNotNull(analyzer);
+            this.riskAnalyzer = Objects.requireNonNull(analyzer);
         } finally {
             lock.unlock();
         }
@@ -1600,29 +1662,27 @@ public class Wallet extends BaseTaggableObject
      * consistency. After connecting to a file, you no longer need to save the wallet manually, it will do it
      * whenever necessary. Protocol buffer serialization will be used.</p>
      *
-     * <p>If delayTime is set, a background thread will be created and the wallet will only be saved to
-     * disk every so many time units. If no changes have occurred for the given time period, nothing will be written.
+     * <p>A background thread will be created and the wallet will only be saved to
+     * disk every periodically. If no changes have occurred for the given time period, nothing will be written.
      * In this way disk IO can be rate limited. It's a good idea to set this as otherwise the wallet can change very
-     * frequently, eg if there are a lot of transactions in it or during block sync, and there will be a lot of redundant
+     * frequently, e.g. if there are a lot of transactions in it or during block sync, and there will be a lot of redundant
      * writes. Note that when a new key is added, that always results in an immediate save regardless of
-     * delayTime. <b>You should still save the wallet manually using {@link Wallet#saveToFile(File)} when your program
+     * delay. <b>You should still save the wallet manually using {@link Wallet#saveToFile(File)} when your program
      * is about to shut down as the JVM will not wait for the background thread.</b></p>
      *
-     * <p>An event listener can be provided. If a delay greater than 0 was specified, it will be called on a background thread
-     * with the wallet locked when an auto-save occurs. If delay is zero or you do something that always triggers
-     * an immediate save, like adding a key, the event listener will be invoked on the calling threads.</p>
+     * <p>An event listener can be provided. It will be called on a background thread
+     * with the wallet locked when an auto-save occurs.</p>
      *
      * @param f The destination file to save to.
-     * @param delayTime How many time units to wait until saving the wallet on a background thread.
-     * @param timeUnit the unit of measurement for delayTime.
+     * @param delay How much time to wait until saving the wallet on a background thread.
      * @param eventListener callback to be informed when the auto-save thread does things, or null
      */
-    public WalletFiles autosaveToFile(File f, long delayTime, TimeUnit timeUnit,
-                                      @Nullable WalletFiles.Listener eventListener) {
+    public WalletFiles autosaveToFile(File f, Duration delay, WalletFiles.@Nullable Listener eventListener) {
         lock.lock();
         try {
-            checkState(vFileManager == null, "Already auto saving this wallet.");
-            WalletFiles manager = new WalletFiles(this, f, delayTime, timeUnit);
+            checkState(vFileManager == null, () ->
+                    "already auto saving this wallet");
+            WalletFiles manager = new WalletFiles(this, f, delay);
             if (eventListener != null)
                 manager.setListener(eventListener);
             vFileManager = manager;
@@ -1635,7 +1695,7 @@ public class Wallet extends BaseTaggableObject
     /**
      * <p>
      * Disables auto-saving, after it had been enabled with
-     * {@link Wallet#autosaveToFile(File, long, TimeUnit, WalletFiles.Listener)}
+     * {@link Wallet#autosaveToFile(File, Duration, WalletFiles.Listener)}
      * before. This method blocks until finished.
      * </p>
      */
@@ -1644,7 +1704,8 @@ public class Wallet extends BaseTaggableObject
         try {
             WalletFiles files = vFileManager;
             vFileManager = null;
-            checkState(files != null, "Auto saving not enabled.");
+            checkState(files != null, () ->
+                    "auto saving not enabled");
             files.shutdownAndWait();
         } finally {
             lock.unlock();
@@ -1687,28 +1748,34 @@ public class Wallet extends BaseTaggableObject
         }
     }
 
-    /** Returns the parameters this wallet was created with. */
-    public NetworkParameters getParams() {
-        return params;
-    }
-
-    /** Returns the API context that this wallet was created with. */
-    public Context getContext() {
-        return context;
-    }
-
     /**
-     * <p>Returns a wallet deserialized from the given file. Extensions previously saved with the wallet can be
-     * deserialized by calling @{@link WalletExtension#deserializeWalletExtension(Wallet, byte[])}}</p>
+     * Returns a wallet deserialized from the given file. Extensions previously saved with the wallet can be
+     * deserialized by calling @{@link WalletExtension#deserializeWalletExtension(Wallet, byte[])}}
      *
      * @param file the wallet file to read
      * @param walletExtensions extensions possibly added to the wallet.
+     * @return The Wallet
+     * @throws UnreadableWalletException if there was a problem loading or parsing the file
      */
     public static Wallet loadFromFile(File file, @Nullable WalletExtension... walletExtensions) throws UnreadableWalletException {
-        try {
-            try (FileInputStream stream = new FileInputStream(file)) {
-                return loadFromFileStream(stream, walletExtensions);
-            }
+        return loadFromFile(file, WalletProtobufSerializer.WalletFactory.DEFAULT, false, false, walletExtensions);
+    }
+
+    /**
+     * Returns a wallet deserialized from the given file. Extensions previously saved with the wallet can be
+     * deserialized by calling @{@link WalletExtension#deserializeWalletExtension(Wallet, byte[])}}
+     *
+     * @param file the wallet file to read
+     * @param factory wallet factory
+     * @param forceReset force a reset of the wallet
+     * @param ignoreMandatoryExtensions if true, mandatory extensions will be ignored instead of causing load errors (not recommended)
+     * @param walletExtensions extensions possibly added to the wallet.
+     * @return The Wallet
+     * @throws UnreadableWalletException if there was a problem loading or parsing the file
+     */
+    public static Wallet loadFromFile(File file, WalletProtobufSerializer.WalletFactory factory, boolean forceReset, boolean ignoreMandatoryExtensions, @Nullable WalletExtension... walletExtensions) throws UnreadableWalletException {
+        try (FileInputStream stream = new FileInputStream(file)) {
+            return loadFromFileStream(stream, factory, forceReset, ignoreMandatoryExtensions, walletExtensions);
         } catch (IOException e) {
             throw new UnreadableWalletException("Could not open file", e);
         }
@@ -1777,7 +1844,7 @@ public class Wallet extends BaseTaggableObject
      * If isSpent - check that all my outputs spent, otherwise check that there at least
      * one unspent.
      */
-    @VisibleForTesting
+    // For testing only
     boolean isTxConsistent(final Transaction tx, final boolean isSpent) {
         boolean isActuallySpent = true;
         for (TransactionOutput o : tx.getOutputs()) {
@@ -1797,9 +1864,33 @@ public class Wallet extends BaseTaggableObject
         return isActuallySpent == isSpent;
     }
 
-    /** Returns a wallet deserialized from the given input stream and wallet extensions. */
+    /**
+     * Returns a wallet deserialized from the given input stream and wallet extensions.
+     * @param stream An open InputStream containing a ProtoBuf Wallet
+     * @param walletExtensions extensions possibly added to the wallet.
+     * @return The Wallet
+     * @throws UnreadableWalletException if there was a problem reading or parsing the stream
+     */
     public static Wallet loadFromFileStream(InputStream stream, @Nullable WalletExtension... walletExtensions) throws UnreadableWalletException {
-        Wallet wallet = new WalletProtobufSerializer().readWallet(stream, walletExtensions);
+        return loadFromFileStream(stream, WalletProtobufSerializer.WalletFactory.DEFAULT, false, false, walletExtensions);
+    }
+
+    /**
+     * Returns a wallet deserialized from the given input stream and wallet extensions.
+     * @param stream An open InputStream containing a ProtoBuf Wallet
+     * @param factory wallet factory
+     * @param forceReset if true, configure wallet to replay transactions from the blockchain
+     * @param ignoreMandatoryExtensions if true, mandatory extensions will be ignored instead of causing load errors (not recommended)
+     * @param walletExtensions extensions possibly added to the wallet.
+     * @return The Wallet
+     * @throws UnreadableWalletException if there was a problem reading or parsing the stream
+     */
+    public static Wallet loadFromFileStream(InputStream stream,  WalletProtobufSerializer.WalletFactory factory, boolean forceReset, boolean ignoreMandatoryExtensions, @Nullable WalletExtension... walletExtensions) throws UnreadableWalletException {
+        WalletProtobufSerializer loader = new WalletProtobufSerializer(factory);
+        if (ignoreMandatoryExtensions) {
+            loader.setRequireMandatoryExtensions(false);
+        }
+        Wallet wallet = loader.readWallet(stream, forceReset, walletExtensions);
         if (!wallet.isConsistent()) {
             log.error("Loaded an inconsistent wallet");
         }
@@ -1873,7 +1964,7 @@ public class Wallet extends BaseTaggableObject
         // spend against one of our other pending transactions.
         lock.lock();
         try {
-            tx.verify();
+            Transaction.verify(network, tx);
             // Ignore it if we already know about this transaction. Receiving a pending transaction never moves it
             // between pools.
             EnumSet<Pool> containingPools = getContainingPools(tx);
@@ -1890,9 +1981,13 @@ public class Wallet extends BaseTaggableObject
 
                 // Clone transaction to avoid multiple wallets pointing to the same transaction. This can happen when
                 // two wallets depend on the same transaction.
-                Transaction cloneTx = tx.getParams().getDefaultSerializer().makeTransaction(tx.bitcoinSerialize());
+                Transaction cloneTx = params.getDefaultSerializer().makeTransaction(ByteBuffer.wrap(tx.serialize()));
                 cloneTx.setPurpose(tx.getPurpose());
-                cloneTx.setUpdateTime(tx.getUpdateTime());
+                Optional<Instant> updateTime = tx.updateTime();
+                if (updateTime.isPresent())
+                    cloneTx.setUpdateTime(updateTime.get());
+                else
+                    cloneTx.clearUpdateTime();
 
                 riskDropped.put(cloneTx.getTxId(), cloneTx);
                 log.warn("There are now {} risk dropped transactions being kept in memory", riskDropped.size());
@@ -1903,15 +1998,19 @@ public class Wallet extends BaseTaggableObject
             if (log.isInfoEnabled())
                 log.info("Received a pending transaction {} that spends {} from our own wallet, and sends us {}",
                         tx.getTxId(), valueSentFromMe.toFriendlyString(), valueSentToMe.toFriendlyString());
-            if (tx.getConfidence().getSource().equals(TransactionConfidence.Source.UNKNOWN)) {
+            if (getConfidence(tx).getSource().equals(TransactionConfidence.Source.UNKNOWN)) {
                 log.warn("Wallet received transaction with an unknown source. Consider tagging it!");
             }
 
             // Clone transaction to avoid multiple wallets pointing to the same transaction. This can happen when
             // two wallets depend on the same transaction.
-            Transaction cloneTx = tx.getParams().getDefaultSerializer().makeTransaction(tx.bitcoinSerialize());
+            Transaction cloneTx = params.getDefaultSerializer().makeTransaction(ByteBuffer.wrap(tx.serialize()));
             cloneTx.setPurpose(tx.getPurpose());
-            cloneTx.setUpdateTime(tx.getUpdateTime());
+            Optional<Instant> updateTime = tx.updateTime();
+            if (updateTime.isPresent())
+                cloneTx.setUpdateTime(updateTime.get());
+            else
+                cloneTx.clearUpdateTime();
 
             // If this tx spends any of our unspent outputs, mark them as spent now, then add to the pending pool. This
             // ensures that if some other client that has our keys broadcasts a spend we stay in sync. Also updates the
@@ -1935,7 +2034,7 @@ public class Wallet extends BaseTaggableObject
         lock.lock();
         try {
             if (dependencies == null)
-                dependencies = ImmutableList.of();
+                dependencies = Collections.emptyList();
             RiskAnalysis analysis = riskAnalyzer.create(this, tx, dependencies);
             RiskAnalysis.Result result = analysis.analyze();
             if (result != RiskAnalysis.Result.OK) {
@@ -2013,6 +2112,18 @@ public class Wallet extends BaseTaggableObject
     }
 
     /**
+     * Determine if a transaction is <i>mature</i>. A coinbase transaction is <i>mature</i> if it has been confirmed at least
+     * {@link NetworkParameters#getSpendableCoinbaseDepth()} times. On {@link BitcoinNetwork#MAINNET} this value is {@code 100}.
+     * For purposes of this method, non-coinbase transactions are also considered <i>mature</i>.
+     * @param tx the transaction to evaluate
+     * @return {@code true} if it is a mature coinbase transaction or if it is not a coinbase transaction
+     */
+    public boolean isTransactionMature(Transaction tx) {
+        return !tx.isCoinBase() ||
+                getConfidence(tx).getDepthInBlocks() >= params.getSpendableCoinbaseDepth();
+    }
+
+    /**
      * Finds transactions in the specified candidates that double spend "tx". Not a general check, but it can work even if
      * the double spent inputs are not ours.
      * @return The set of transactions that double spend "tx".
@@ -2057,7 +2168,7 @@ public class Wallet extends BaseTaggableObject
             for (Transaction anotherTx : txPool) {
                 if (anotherTx.equals(tx)) continue;
                 for (TransactionInput input : anotherTx.getInputs()) {
-                    if (input.getOutpoint().getHash().equals(tx.getTxId())) {
+                    if (input.getOutpoint().hash().equals(tx.getTxId())) {
                         if (txQueue.get(anotherTx.getTxId()) == null) {
                             txQueue.put(anotherTx.getTxId(), anotherTx);
                             txSet.add(anotherTx);
@@ -2195,9 +2306,9 @@ public class Wallet extends BaseTaggableObject
                 currentTxDependencies.remove(tx);
                 List<Transaction> currentTxDependenciesSorted = sortTxnsByDependency(currentTxDependencies);
                 for (Transaction txDependency : currentTxDependenciesSorted) {
-                    if (txDependency.getConfidence().getConfidenceType().equals(ConfidenceType.IN_CONFLICT)) {
+                    if (getConfidence(txDependency).getConfidenceType().equals(ConfidenceType.IN_CONFLICT)) {
                         if (isNotSpendingTxnsInConfidenceType(txDependency, ConfidenceType.IN_CONFLICT)) {
-                            txDependency.getConfidence().setConfidenceType(ConfidenceType.PENDING);
+                            getConfidence(txDependency).setConfidenceType(ConfidenceType.PENDING);
                             confidenceChanged.put(txDependency, TransactionConfidence.Listener.ChangeReason.TYPE);
                         }
                     }
@@ -2235,7 +2346,7 @@ public class Wallet extends BaseTaggableObject
                     queueOnCoinsSent(tx, prevBalance, newBalance);
                 }
             }
-            checkBalanceFuturesLocked(newBalance);
+            checkBalanceFuturesLocked();
         }
 
         informConfidenceListenersIfNotReorganizing();
@@ -2248,8 +2359,8 @@ public class Wallet extends BaseTaggableObject
     /** Finds if tx is NOT spending other txns which are in the specified confidence type */
     private boolean isNotSpendingTxnsInConfidenceType(Transaction tx, ConfidenceType confidenceType) {
         for (TransactionInput txInput : tx.getInputs()) {
-            Transaction connectedTx = this.getTransaction(txInput.getOutpoint().getHash());
-            if (connectedTx != null && connectedTx.getConfidence().getConfidenceType().equals(confidenceType)) {
+            Transaction connectedTx = this.getTransaction(txInput.getOutpoint().hash());
+            if (connectedTx != null && getConfidence(connectedTx).getConfidenceType().equals(confidenceType)) {
                 return false;
             }
         }
@@ -2258,13 +2369,13 @@ public class Wallet extends BaseTaggableObject
 
     /**
      * Creates and returns a new List with the same txns as inputSet
-     * but txns are sorted by depencency (a topological sort).
+     * but txns are sorted by dependency (a topological sort).
      * If tx B spends tx A, then tx A should be before tx B on the returned List.
      * Several invocations to this method with the same inputSet could result in lists with txns in different order,
      * as there is no guarantee on the order of the returned txns besides what was already stated.
      */
     List<Transaction> sortTxnsByDependency(Set<Transaction> inputSet) {
-        ArrayList<Transaction> result = new ArrayList<>(inputSet);
+        List<Transaction> result = new ArrayList<>(inputSet);
         for (int i = 0; i < result.size()-1; i++) {
             boolean txAtISpendsOtherTxInTheList;
             do {
@@ -2285,7 +2396,7 @@ public class Wallet extends BaseTaggableObject
     /** Finds whether txA spends txB */
     boolean spends(Transaction txA, Transaction txB) {
         for (TransactionInput txInput : txA.getInputs()) {
-            if (txInput.getOutpoint().getHash().equals(txB.getTxId())) {
+            if (txInput.getOutpoint().hash().equals(txB.getTxId())) {
                 return true;
             }
         }
@@ -2297,7 +2408,7 @@ public class Wallet extends BaseTaggableObject
             return;
         for (Map.Entry<Transaction, TransactionConfidence.Listener.ChangeReason> entry : confidenceChanged.entrySet()) {
             final Transaction tx = entry.getKey();
-            tx.getConfidence().queueListeners(entry.getValue());
+            getConfidence(tx).queueListeners(entry.getValue());
             queueOnTransactionConfidenceChanged(tx);
         }
         confidenceChanged.clear();
@@ -2322,7 +2433,7 @@ public class Wallet extends BaseTaggableObject
             // Store the new block hash.
             setLastBlockSeenHash(newBlockHash);
             setLastBlockSeenHeight(block.getHeight());
-            setLastBlockSeenTimeSecs(block.getHeader().getTimeSeconds());
+            setLastBlockSeenTime(block.getHeader().time());
             // Notify all the BUILDING transactions of the new block.
             // This is so that they can update their depth.
             Set<Transaction> transactions = getTransactions(true);
@@ -2332,7 +2443,7 @@ public class Wallet extends BaseTaggableObject
                     // increment the tx confidence depth twice, it'd result in miscounting.
                     ignoreNextNewBlock.remove(tx.getTxId());
                 } else {
-                    TransactionConfidence confidence = tx.getConfidence();
+                    TransactionConfidence confidence = getConfidence(tx);
                     if (confidence.getConfidenceType() == ConfidenceType.BUILDING) {
                         // Erase the set of seen peers once the tx is so deep that it seems unlikely to ever go
                         // pending again. We could clear this data the moment a tx is seen in the block chain, but
@@ -2341,7 +2452,7 @@ public class Wallet extends BaseTaggableObject
                         // included once again. We could have a separate was-in-chain-and-now-isn't confidence type
                         // but this way is backwards compatible with existing software, and the new state probably
                         // wouldn't mean anything different to just remembering peers anyway.
-                        if (confidence.incrementDepthInBlocks() > context.getEventHorizon())
+                        if (confidence.incrementDepthInBlocks() > Context.getOrCreate().getEventHorizon())
                             confidence.clearBroadcastBy();
                         confidenceChanged.put(tx, TransactionConfidence.Listener.ChangeReason.DEPTH);
                     }
@@ -2384,7 +2495,7 @@ public class Wallet extends BaseTaggableObject
             // to confirm them again. But this is a deeply unusual edge case that due to the maturity rule should never
             // happen in practice, thus for simplicities sake we ignore it here.
             log.info("  coinbase tx <-dead: confidence {}", tx.getTxId(),
-                    tx.getConfidence().getConfidenceType().name());
+                    getConfidence(tx).getConfidenceType().name());
             dead.remove(tx.getTxId());
         }
 
@@ -2474,7 +2585,7 @@ public class Wallet extends BaseTaggableObject
                 }
             }
 
-            TransactionOutput output = checkNotNull(input.getConnectedOutput());
+            TransactionOutput output = Objects.requireNonNull(input.getConnectedOutput());
             if (result == TransactionInput.ConnectionResult.ALREADY_SPENT) {
                 if (fromChain) {
                     // Can be:
@@ -2489,15 +2600,15 @@ public class Wallet extends BaseTaggableObject
                     // so the exact nature of the mutation can be examined.
                     log.warn("Saw two pending transactions double spend each other");
                     log.warn("  offending input is input {}", tx.getInputs().indexOf(input));
-                    log.warn("{}: {}", tx.getTxId(), tx.toHexString());
+                    log.warn("{}: {}", tx.getTxId(), ByteUtils.formatHex(tx.serialize()));
                     Transaction other = output.getSpentBy().getParentTransaction();
-                    log.warn("{}: {}", other.getTxId(), other.toHexString());
+                    log.warn("{}: {}", other.getTxId(), ByteUtils.formatHex(other.serialize()));
                 }
             } else if (result == TransactionInput.ConnectionResult.SUCCESS) {
                 // Otherwise we saw a transaction spend our coins, but we didn't try and spend them ourselves yet.
                 // The outputs are already marked as spent by the connect call above, so check if there are any more for
                 // us to use. Move if not.
-                Transaction connected = checkNotNull(input.getConnectedTransaction());
+                Transaction connected = Objects.requireNonNull(input.getConnectedTransaction());
                 log.info("  marked {} as spent by {}", input.getOutpoint(), tx.getTxId());
                 maybeMovePool(connected, "prevtx");
                 // Just because it's connected doesn't mean it's actually ours: sometimes we have total visibility.
@@ -2554,14 +2665,14 @@ public class Wallet extends BaseTaggableObject
             for (TransactionInput deadInput : tx.getInputs()) {
                 Transaction connected = deadInput.getConnectedTransaction();
                 if (connected == null) continue;
-                if (connected.getConfidence().getConfidenceType() != ConfidenceType.DEAD && deadInput.getConnectedOutput().getSpentBy() != null && deadInput.getConnectedOutput().getSpentBy().equals(deadInput)) {
+                if (getConfidence(connected).getConfidenceType() != ConfidenceType.DEAD && deadInput.getConnectedOutput().getSpentBy() != null && deadInput.getConnectedOutput().getSpentBy().equals(deadInput)) {
                     checkState(myUnspents.add(deadInput.getConnectedOutput()));
                     log.info("Added to UNSPENTS: {} in {}", deadInput.getConnectedOutput(), deadInput.getConnectedOutput().getParentTransaction().getTxId());
                 }
                 deadInput.disconnect();
                 maybeMovePool(connected, "kill");
             }
-            tx.getConfidence().setOverridingTransaction(overridingTx);
+            getConfidence(tx).setOverridingTxId(overridingTx != null ? overridingTx.getTxId() : null);
             confidenceChanged.put(tx, TransactionConfidence.Listener.ChangeReason.TYPE);
             // Now kill any transactions we have that depended on this one.
             for (TransactionOutput deadOutput : tx.getOutputs()) {
@@ -2632,14 +2743,14 @@ public class Wallet extends BaseTaggableObject
      * @throws VerificationException If transaction fails to verify
      */
     public boolean maybeCommitTx(Transaction tx) throws VerificationException {
-        tx.verify();
+        Transaction.verify(network, tx);
         lock.lock();
         try {
             if (pending.containsKey(tx.getTxId()))
                 return false;
             log.info("commitTx of {}", tx.getTxId());
             Coin balance = getBalance();
-            tx.setUpdateTime(Utils.now());
+            tx.setUpdateTime(TimeUtils.currentTime());
             // Put any outputs that are sending money back to us into the unspents map, and calculate their total value.
             Coin valueSentToMe = Coin.ZERO;
             for (TransactionOutput o : tx.getOutputs()) {
@@ -2661,7 +2772,7 @@ public class Wallet extends BaseTaggableObject
                 // tx is a double spend against a tx already in the best chain or spends outputs of a DEAD tx.
                 // Add tx to the dead pool and schedule confidence listener notifications.
                 log.info("->dead: {}", tx.getTxId());
-                tx.getConfidence().setConfidenceType(ConfidenceType.DEAD);
+                getConfidence(tx).setConfidenceType(ConfidenceType.DEAD);
                 confidenceChanged.put(tx, TransactionConfidence.Listener.ChangeReason.TYPE);
                 addWalletTransaction(Pool.DEAD, tx);
             } else if (!doubleSpendPendingTxns.isEmpty() ||
@@ -2674,14 +2785,14 @@ public class Wallet extends BaseTaggableObject
                 doubleSpendPendingTxns.add(tx);
                 addTransactionsDependingOn(doubleSpendPendingTxns, getTransactions(true));
                 for (Transaction doubleSpendTx : doubleSpendPendingTxns) {
-                    doubleSpendTx.getConfidence().setConfidenceType(ConfidenceType.IN_CONFLICT);
+                    getConfidence(doubleSpendTx).setConfidenceType(ConfidenceType.IN_CONFLICT);
                     confidenceChanged.put(doubleSpendTx, TransactionConfidence.Listener.ChangeReason.TYPE);
                 }
             } else {
                 // No conflict detected.
                 // Add to the pending pool and schedule confidence listener notifications.
                 log.info("->pending: {}", tx.getTxId());
-                tx.getConfidence().setConfidenceType(ConfidenceType.PENDING);
+                getConfidence(tx).setConfidenceType(ConfidenceType.PENDING);
                 confidenceChanged.put(tx, TransactionConfidence.Listener.ChangeReason.TYPE);
                 addWalletTransaction(Pool.PENDING, tx);
             }
@@ -2695,7 +2806,7 @@ public class Wallet extends BaseTaggableObject
                 Coin valueSentFromMe = tx.getValueSentFromMe(this);
                 Coin newBalance = balance.add(valueSentToMe).subtract(valueSentFromMe);
                 if (valueSentToMe.signum() > 0) {
-                    checkBalanceFuturesLocked(null);
+                    checkBalanceFuturesLocked();
                     queueOnCoinsReceived(tx, balance, newBalance);
                 }
                 if (valueSentFromMe.signum() > 0)
@@ -2732,7 +2843,8 @@ public class Wallet extends BaseTaggableObject
      * @throws VerificationException if transaction was already in the pending pool
      */
     public void commitTx(Transaction tx) throws VerificationException {
-        checkArgument(maybeCommitTx(tx), "commitTx called on the same transaction twice");
+        checkArgument(maybeCommitTx(tx), () ->
+                "commitTx called on the same transaction twice");
     }
 
     //endregion
@@ -3082,7 +3194,7 @@ public class Wallet extends BaseTaggableObject
         }
         // This is safe even if the listener has been added before, as TransactionConfidence ignores duplicate
         // registration requests. That makes the code in the wallet simpler.
-        tx.getConfidence().addEventListener(Threading.SAME_THREAD, txConfidenceListener);
+        getConfidence(tx).addEventListener(Threading.SAME_THREAD, txConfidenceListener);
     }
 
     /**
@@ -3097,7 +3209,7 @@ public class Wallet extends BaseTaggableObject
      * Dead transactions (overridden by double spends) are optionally included.</p>
      * <p>Note: the current implementation is O(num transactions in wallet). Regardless of how many transactions are
      * requested, the cost is always the same. In future, requesting smaller numbers of transactions may be faster
-     * depending on how the wallet is implemented (eg if backed by a database).</p>
+     * depending on how the wallet is implemented (e.g. if backed by a database).</p>
      */
     public List<Transaction> getRecentTransactions(int numTransactions, boolean includeDead) {
         lock.lock();
@@ -3108,7 +3220,7 @@ public class Wallet extends BaseTaggableObject
             if (numTransactions > size || numTransactions == 0) {
                 numTransactions = size;
             }
-            ArrayList<Transaction> all = new ArrayList<>(getTransactions(includeDead));
+            List<Transaction> all = new ArrayList<>(getTransactions(includeDead));
             // Order by update time.
             Collections.sort(all, Transaction.SORT_TX_BY_UPDATE_TIME);
             if (numTransactions == all.size()) {
@@ -3167,7 +3279,7 @@ public class Wallet extends BaseTaggableObject
             clearTransactions();
             lastBlockSeenHash = null;
             lastBlockSeenHeight = -1; // Magic value for 'never'.
-            lastBlockSeenTimeSecs = 0;
+            lastBlockSeenTime = null;
             saveLater();
             maybeQueueOnWalletChanged();
         } finally {
@@ -3212,24 +3324,24 @@ public class Wallet extends BaseTaggableObject
         lock.lock();
         keyChainGroupLock.lock();
         try {
-            LinkedList<TransactionOutput> candidates = new LinkedList<>();
-            for (Transaction tx : Iterables.concat(unspent.values(), pending.values())) {
-                if (excludeImmatureCoinbases && !tx.isMature()) continue;
-                for (TransactionOutput output : tx.getOutputs()) {
-                    if (!output.isAvailableForSpending()) continue;
-                    try {
-                        Script scriptPubKey = output.getScriptPubKey();
-                        if (!watchedScripts.contains(scriptPubKey)) continue;
-                        candidates.add(output);
-                    } catch (ScriptException e) {
-                        // Ignore
-                    }
-                }
-            }
-            return candidates;
+            return Stream.concat(unspent.values().stream(), pending.values().stream())
+                    .filter(tx -> !excludeImmatureCoinbases || isTransactionMature(tx))
+                    .flatMap(tx -> tx.getOutputs().stream())
+                            .filter(TransactionOutput::isAvailableForSpending)
+                            .filter(this::isWatchedScriptPubKey)
+                            .collect(StreamUtils.toUnmodifiableList());
         } finally {
             keyChainGroupLock.unlock();
             lock.unlock();
+        }
+    }
+
+    private boolean isWatchedScriptPubKey(TransactionOutput output) {
+        try {
+            Script scriptPubKey = output.getScriptPubKey();
+            return watchedScripts.contains(scriptPubKey);
+        } catch (ScriptException e) {
+            return false;
         }
     }
 
@@ -3358,34 +3470,17 @@ public class Wallet extends BaseTaggableObject
     }
 
     /**
-     * @deprecated Use {@link #toString(boolean, boolean, KeyParameter, boolean, boolean, AbstractBlockChain)} instead.
-     */
-    @Deprecated
-    public String toString(boolean includePrivateKeys, boolean includeTransactions, boolean includeExtensions,
-            @Nullable AbstractBlockChain chain) {
-        return toString(false, includePrivateKeys, null, includeTransactions, includeExtensions, chain);
-    }
-
-    /**
-     * @deprecated Use {@link #toString(boolean, boolean, KeyParameter, boolean, boolean, AbstractBlockChain)} instead.
-     */
-    @Deprecated
-    public String toString(boolean includePrivateKeys, @Nullable KeyParameter aesKey, boolean includeTransactions,
-            boolean includeExtensions, @Nullable AbstractBlockChain chain) {
-        return toString(false, includePrivateKeys, aesKey, includeTransactions, includeExtensions, chain);
-    }
-
-    /**
-     * Formats the wallet as a human readable piece of text. Intended for debugging, the format is not meant to be
-     * stable or human readable.
-     * @param includeLookahead Wether lookahead keys should be included.
+     * Formats the wallet as a human-readable piece of text. Intended for debugging, the format is not meant to be
+     * stable or human-readable.
+     * @param includeLookahead Whether lookahead keys should be included.
      * @param includePrivateKeys Whether raw private key data should be included.
      * @param aesKey for decrypting private key data for if the wallet is encrypted.
      * @param includeTransactions Whether to print transaction data.
      * @param includeExtensions Whether to print extension data.
-     * @param chain If set, will be used to estimate lock times for block timelocked transactions.
+     * @param chain If set, will be used to estimate lock times for block time-locked transactions.
+     * @return Human-readable wallet debugging information
      */
-    public String toString(boolean includeLookahead, boolean includePrivateKeys, @Nullable KeyParameter aesKey,
+    public String toString(boolean includeLookahead, boolean includePrivateKeys, @Nullable AesKey aesKey,
             boolean includeTransactions, boolean includeExtensions, @Nullable AbstractBlockChain chain) {
         lock.lock();
         keyChainGroupLock.lock();
@@ -3402,9 +3497,10 @@ public class Wallet extends BaseTaggableObject
             builder.append("  ").append(unspent.size()).append(" unspent\n");
             builder.append("  ").append(spent.size()).append(" spent\n");
             builder.append("  ").append(dead.size()).append(" dead\n");
-            final Date lastBlockSeenTime = getLastBlockSeenTime();
             builder.append("Last seen best block: ").append(getLastBlockSeenHeight()).append(" (")
-                    .append(lastBlockSeenTime == null ? "time unknown" : Utils.dateTimeFormat(lastBlockSeenTime))
+                    .append(lastBlockSeenTime()
+                            .map(instant -> TimeUtils.dateTimeFormat(instant))
+                            .orElse("time unknown"))
                     .append("): ").append(getLastBlockSeenHash()).append('\n');
             final KeyCrypter crypter = keyChainGroup.getKeyCrypter();
             if (crypter != null)
@@ -3414,11 +3510,11 @@ public class Wallet extends BaseTaggableObject
 
             // Do the keys.
             builder.append("\nKeys:\n");
-            builder.append("Earliest creation time: ").append(Utils.dateTimeFormat(getEarliestKeyCreationTime() * 1000))
+            builder.append("Earliest creation time: ").append(TimeUtils.dateTimeFormat(earliestKeyCreationTime()))
                     .append('\n');
-            final Date keyRotationTime = getKeyRotationTime();
-            if (keyRotationTime != null)
-                builder.append("Key rotation time:      ").append(Utils.dateTimeFormat(keyRotationTime)).append('\n');
+            final Optional<Instant> keyRotationTime = keyRotationTime();
+            if (keyRotationTime.isPresent())
+                builder.append("Key rotation time:      ").append(TimeUtils.dateTimeFormat(keyRotationTime.get())).append('\n');
             builder.append(keyChainGroup.toString(includeLookahead, includePrivateKeys, aesKey));
 
             if (!watchedScripts.isEmpty()) {
@@ -3484,8 +3580,8 @@ public class Wallet extends BaseTaggableObject
                 // Ignore and don't print this line.
             }
             if (tx.hasConfidence())
-                builder.append("  confidence: ").append(tx.getConfidence()).append('\n');
-            builder.append(tx.toString(chain, "  "));
+                builder.append("  confidence: ").append(getConfidence(tx)).append('\n');
+            builder.append(tx.toString(chain, network(), "  "));
         }
     }
 
@@ -3502,26 +3598,28 @@ public class Wallet extends BaseTaggableObject
     }
 
     /**
-     * Returns the earliest creation time of keys or watched scripts in this wallet, in seconds since the epoch, ie the min
-     * of {@link ECKey#getCreationTimeSeconds()}. This can return zero if at least one key does
-     * not have that data (was created before key timestamping was implemented). <p>
+     * Returns the earliest creation time of keys or watched scripts in this wallet, ie the min
+     * of {@link ECKey#getCreationTime()}. This can return {@link Instant#EPOCH} if at least one key does
+     * not have that data (e.g. is an imported key with unknown timestamp). <p>
      *
-     * This method is most often used in conjunction with {@link PeerGroup#setFastCatchupTimeSecs(long)} in order to
-     * optimize chain download for new users of wallet apps. Backwards compatibility notice: if you get zero from this
+     * This method is most often used in conjunction with {@link PeerGroup#setFastCatchupTime(Instant)} in order to
+     * optimize chain download for new users of wallet apps. Backwards compatibility notice: if you get {@link Instant#EPOCH} from this
      * method, you can instead use the time of the first release of your software, as it's guaranteed no users will
      * have wallets pre-dating this time. <p>
      *
-     * If there are no keys in the wallet, the current time is returned.
+     * If there are no keys in the wallet, {@link Instant#MAX} is returned.
+     *
+     * @return earliest creation times of keys in this wallet,
+     *         {@link Instant#EPOCH} if at least one time is unknown,
+     *         {@link Instant#MAX} if no keys in this wallet
      */
     @Override
-    public long getEarliestKeyCreationTime() {
+    public Instant earliestKeyCreationTime() {
         keyChainGroupLock.lock();
         try {
-            long earliestTime = keyChainGroup.getEarliestKeyCreationTime();
+            Instant earliestTime = keyChainGroup.earliestKeyCreationTime();
             for (Script script : watchedScripts)
-                earliestTime = Math.min(script.getCreationTimeSeconds(), earliestTime);
-            if (earliestTime == Long.MAX_VALUE)
-                return Utils.currentTimeSeconds();
+                earliestTime = TimeUtils.earlier(script.creationTime().orElse(Instant.EPOCH), earliestTime);
             return earliestTime;
         } finally {
             keyChainGroupLock.unlock();
@@ -3557,45 +3655,38 @@ public class Wallet extends BaseTaggableObject
         }
     }
 
-    public void setLastBlockSeenTimeSecs(long timeSecs) {
+    public void setLastBlockSeenTime(Instant time) {
         lock.lock();
         try {
-            lastBlockSeenTimeSecs = timeSecs;
+            lastBlockSeenTime = Objects.requireNonNull(time);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void clearLastBlockSeenTime() {
+        lock.lock();
+        try {
+            lastBlockSeenTime = null;
         } finally {
             lock.unlock();
         }
     }
 
     /**
-     * Returns the UNIX time in seconds since the epoch extracted from the last best seen block header. This timestamp
+     * Returns time extracted from the last best seen block header, or empty. This timestamp
      * is <b>not</b> the local time at which the block was first observed by this application but rather what the block
      * (i.e. miner) self declares. It is allowed to have some significant drift from the real time at which the block
      * was found, although most miners do use accurate times. If this wallet is old and does not have a recorded
      * time then this method returns zero.
      */
-    public long getLastBlockSeenTimeSecs() {
+    public Optional<Instant> lastBlockSeenTime() {
         lock.lock();
         try {
-            return lastBlockSeenTimeSecs;
+            return Optional.ofNullable(lastBlockSeenTime);
         } finally {
             lock.unlock();
         }
-    }
-
-    /**
-     * Returns a {@link Date} representing the time extracted from the last best seen block header. This timestamp
-     * is <b>not</b> the local time at which the block was first observed by this application but rather what the block
-     * (i.e. miner) self declares. It is allowed to have some significant drift from the real time at which the block
-     * was found, although most miners do use accurate times. If this wallet is old and does not have a recorded
-     * time then this method returns null.
-     */
-    @Nullable
-    public Date getLastBlockSeenTime() {
-        final long secs = getLastBlockSeenTimeSecs();
-        if (secs == 0)
-            return null;
-        else
-            return new Date(secs * 1000);
     }
 
     /**
@@ -3698,8 +3789,8 @@ public class Wallet extends BaseTaggableObject
         try {
             if (balanceType == BalanceType.AVAILABLE || balanceType == BalanceType.AVAILABLE_SPENDABLE) {
                 List<TransactionOutput> candidates = calculateAllSpendCandidates(true, balanceType == BalanceType.AVAILABLE_SPENDABLE);
-                CoinSelection selection = coinSelector.select(NetworkParameters.MAX_MONEY, candidates);
-                return selection.valueGathered;
+                CoinSelection selection = coinSelector.select(BitcoinNetwork.MAX_MONEY, candidates);
+                return selection.totalValue();
             } else if (balanceType == BalanceType.ESTIMATED || balanceType == BalanceType.ESTIMATED_SPENDABLE) {
                 List<TransactionOutput> all = calculateAllSpendCandidates(false, balanceType == BalanceType.ESTIMATED_SPENDABLE);
                 Coin value = Coin.ZERO;
@@ -3721,21 +3812,21 @@ public class Wallet extends BaseTaggableObject
     public Coin getBalance(CoinSelector selector) {
         lock.lock();
         try {
-            checkNotNull(selector);
+            Objects.requireNonNull(selector);
             List<TransactionOutput> candidates = calculateAllSpendCandidates(true, false);
-            CoinSelection selection = selector.select(params.getMaxMoney(), candidates);
-            return selection.valueGathered;
+            CoinSelection selection = selector.select((Coin) network.maxMoney(), candidates);
+            return selection.totalValue();
         } finally {
             lock.unlock();
         }
     }
 
     private static class BalanceFutureRequest {
-        public final ListenableCompletableFuture<Coin> future;
+        public final CompletableFuture<Coin> future;
         public final Coin value;
         public final BalanceType type;
 
-        private BalanceFutureRequest(ListenableCompletableFuture<Coin> future, Coin value, BalanceType type) {
+        private BalanceFutureRequest(CompletableFuture<Coin> future, Coin value, BalanceType type) {
             this.future = future;
             this.value = value;
             this.type = type;
@@ -3757,10 +3848,10 @@ public class Wallet extends BaseTaggableObject
      * you can use {@link Threading#waitForUserCode()} to block until the future had a
      * chance to be updated.</p>
      */
-    public ListenableCompletableFuture<Coin> getBalanceFuture(final Coin value, final BalanceType type) {
+    public CompletableFuture<Coin> getBalanceFuture(final Coin value, final BalanceType type) {
         lock.lock();
         try {
-            final ListenableCompletableFuture<Coin> future = new ListenableCompletableFuture<>();
+            final CompletableFuture<Coin> future = new CompletableFuture<>();
             final Coin current = getBalance(type);
             if (current.compareTo(value) >= 0) {
                 // Already have enough.
@@ -3779,7 +3870,7 @@ public class Wallet extends BaseTaggableObject
 
     // Runs any balance futures in the user code thread.
     @SuppressWarnings("FieldAccessNotGuarded")
-    private void checkBalanceFuturesLocked(@Nullable Coin avail) {
+    private void checkBalanceFuturesLocked() {
         checkState(lock.isHeldByCurrentThread());
         balanceFutureRequests.forEach(req -> {
             Coin current = getBalance(req.type);   // This could be slow for lots of futures.
@@ -3854,7 +3945,7 @@ public class Wallet extends BaseTaggableObject
 
             // If there is an input that isn't from us, i.e. this is a shared transaction
             Coin txInputsTotal = tx.getInputSum();
-            if (txOwnedInputsTotal != txInputsTotal) {
+            if (!txOwnedInputsTotal.equals(txInputsTotal)) {
 
                 // multiply our output total by the appropriate proportion to account for the inputs that we don't own
                 BigInteger txOutputTotalNum = new BigInteger(txOutputTotal.toString());
@@ -3874,20 +3965,18 @@ public class Wallet extends BaseTaggableObject
 
     //region Creating and sending transactions
 
-    /** A SendResult is returned to you as part of sending coins to a recipient. */
-    public static class SendResult {
-        /** The Bitcoin transaction message that moves the money. */
-        public final Transaction tx;
-        /** A future that will complete once the tx message has been successfully broadcast to the network. This is just the result of calling broadcast.future() */
-        public final ListenableCompletableFuture<Transaction> broadcastComplete;
-        /** The broadcast object returned by the linked TransactionBroadcaster */
-        public final TransactionBroadcast broadcast;
+    /**
+     * A SendResult is returned to you as part of sending coins to a recipient.
+     * @deprecated  Use {@link TransactionBroadcast}
+     */
+    @Deprecated
+    public interface SendResult {
+        Transaction transaction();
 
-        public SendResult(Transaction tx, TransactionBroadcast broadcast) {
-            this.tx = tx;
-            this.broadcast = broadcast;
-            this.broadcastComplete = broadcast.future();
-        }
+        @Deprecated
+        TransactionBroadcast getBroadcast();
+
+        CompletableFuture<TransactionBroadcast> awaitRelayed();
     }
 
     /**
@@ -3941,7 +4030,7 @@ public class Wallet extends BaseTaggableObject
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
     public Transaction createSend(Address address, Coin value)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+            throws InsufficientMoneyException, TransactionCompletionException {
         return createSend(address, value, false);
     }
 
@@ -3969,7 +4058,7 @@ public class Wallet extends BaseTaggableObject
      *
      * @param address The Bitcoin address to send the money to.
      * @param value How much currency to send.
-     * @param allowUnconfirmed Wether to allow spending unconfirmed outputs.
+     * @param allowUnconfirmed Whether to allow spending unconfirmed outputs.
      * @return either the created Transaction or null if there are insufficient coins.
      * @throws InsufficientMoneyException if the request could not be completed due to not enough balance.
      * @throws DustySendRequested if the resultant transaction would violate the dust rules.
@@ -3979,10 +4068,8 @@ public class Wallet extends BaseTaggableObject
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
     public Transaction createSend(Address address, Coin value, boolean allowUnconfirmed)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+            throws InsufficientMoneyException, TransactionCompletionException {
         SendRequest req = SendRequest.to(address, value);
-        if (params.getId().equals(NetworkParameters.ID_UNITTESTNET))
-            req.shuffleOutputs = false;
         if (allowUnconfirmed)
             req.allowUnconfirmed();
         completeTx(req);
@@ -4005,7 +4092,7 @@ public class Wallet extends BaseTaggableObject
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
     public Transaction sendCoinsOffline(SendRequest request)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+            throws InsufficientMoneyException, TransactionCompletionException {
         lock.lock();
         try {
             completeTx(request);
@@ -4043,8 +4130,8 @@ public class Wallet extends BaseTaggableObject
      * @throws MultipleOpReturnRequested if there is more than one OP_RETURN output for the resultant transaction.
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
-    public SendResult sendCoins(TransactionBroadcaster broadcaster, Address to, Coin value)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+    public TransactionBroadcast sendCoins(TransactionBroadcaster broadcaster, Address to, Coin value)
+            throws InsufficientMoneyException, TransactionCompletionException {
         SendRequest request = SendRequest.to(to, value);
         return sendCoins(broadcaster, request);
     }
@@ -4071,8 +4158,8 @@ public class Wallet extends BaseTaggableObject
      * @throws MultipleOpReturnRequested if there is more than one OP_RETURN output for the resultant transaction.
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
-    public SendResult sendCoins(TransactionBroadcaster broadcaster, SendRequest request)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+    public TransactionBroadcast sendCoins(TransactionBroadcaster broadcaster, SendRequest request)
+            throws InsufficientMoneyException, TransactionCompletionException {
         // Should not be locked here, as we're going to call into the broadcaster and that might want to hold its
         // own lock. sendCoinsOffline handles everything that needs to be locked.
         checkState(!lock.isHeldByCurrentThread());
@@ -4080,7 +4167,7 @@ public class Wallet extends BaseTaggableObject
         // Commit the TX to the wallet immediately so the spent coins won't be reused.
         // TODO: We should probably allow the request to specify tx commit only after the network has accepted it.
         Transaction tx = sendCoinsOffline(request);
-        SendResult result = new SendResult(tx, broadcaster.broadcastTransaction(tx));
+        TransactionBroadcast result = broadcaster.broadcastTransaction(tx);
         // The tx has been committed to the pending pool by this point (via sendCoinsOffline -> commitTx), so it has
         // a txConfidenceListener registered. Once the tx is broadcast the peers will update the memory pool with the
         // count of seen peers, the memory pool will update the transaction confidence object, that will invoke the
@@ -4104,10 +4191,11 @@ public class Wallet extends BaseTaggableObject
      * @throws MultipleOpReturnRequested if there is more than one OP_RETURN output for the resultant transaction.
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
-    public SendResult sendCoins(SendRequest request)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+    public TransactionBroadcast sendCoins(SendRequest request)
+            throws InsufficientMoneyException, TransactionCompletionException {
         TransactionBroadcaster broadcaster = vTransactionBroadcaster;
-        checkState(broadcaster != null, "No transaction broadcaster is configured");
+        checkState(broadcaster != null, () ->
+                "no transaction broadcaster is configured");
         return sendCoins(broadcaster, request);
     }
 
@@ -4127,47 +4215,111 @@ public class Wallet extends BaseTaggableObject
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
     public Transaction sendCoins(Peer peer, SendRequest request)
-            throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+            throws InsufficientMoneyException, TransactionCompletionException {
         Transaction tx = sendCoinsOffline(request);
         peer.sendMessage(tx);
         return tx;
     }
 
     /**
+     * Initiate sending the transaction in a {@link SendRequest}. Calls {@link Wallet#sendCoins(SendRequest)} which
+     * performs the following significant operations internally:
+     * <ol>
+     *     <li>{@link Wallet#completeTx(SendRequest)} -- calculate change and sign</li>
+     *     <li>{@link Wallet#commitTx(Transaction)} -- puts the transaction in the {@code Wallet}'s pending pool</li>
+     *     <li>{@link org.bitcoinj.core.TransactionBroadcaster#broadcastTransaction(Transaction)} typically implemented by {@link org.bitcoinj.core.PeerGroup#broadcastTransaction(Transaction)} -- queues requests to send the transaction to a single remote {@code Peer}</li>
+     * </ol>
+     * This method will <i>complete</i> and return a {@link TransactionBroadcast} when the send to the remote peer occurs (is buffered.)
+     * The broadcast process includes the following steps:
+     * <ol>
+     *     <li>Wait until enough {@link org.bitcoinj.core.Peer}s are connected.</li>
+     *     <li>Broadcast (buffer for send) the transaction to a single remote {@link org.bitcoinj.core.Peer}</li>
+     *     <li>Mark {@link TransactionBroadcast#awaitSent()} as complete</li>
+     *     <li>Wait for a number of remote peers to confirm they have received the broadcast</li>
+     *     <li>Mark {@link TransactionBroadcast#awaitRelayed()} as complete</li>
+     * </ol>
+     * @param sendRequest transaction to send
+     * @return A future for the transaction broadcast
+     */
+    public CompletableFuture<TransactionBroadcast> sendTransaction(SendRequest sendRequest) {
+        try {
+            // Complete successfully when the transaction has been sent (or buffered, at least) to peers.
+            return sendCoins(sendRequest).awaitSent();
+        } catch (KeyCrypterException | InsufficientMoneyException e) {
+            // We should never try to send more coins than we have, if we do we get an InsufficientMoneyException
+            return FutureUtils.failedFuture(e);
+        }
+    }
+
+    /**
+     * Wait for at least 1 confirmation on a transaction.
+     * @param tx the transaction we are waiting for
+     * @return a future for an object that contains transaction confidence information
+     */
+    public CompletableFuture<TransactionConfidence> waitForConfirmation(Transaction tx) {
+        return waitForConfirmations(tx, 1);
+    }
+
+    /**
+     * Wait for a required number of confirmations on a transaction.
+     * @param tx the transaction we are waiting for
+     * @param requiredConfirmations the minimum required confirmations before completing
+     * @return a future for an object that contains transaction confidence information
+     */
+    public CompletableFuture<TransactionConfidence> waitForConfirmations(Transaction tx, int requiredConfirmations) {
+
+        return getConfidence(tx).getDepthFuture(requiredConfirmations);
+    }
+
+    TransactionConfidence getConfidence(Transaction tx) {
+        return Context.get().getConfidenceTable().getConfidence(tx);
+    }
+
+    /**
      * Class of exceptions thrown in {@link Wallet#completeTx(SendRequest)}.
      */
-    public static class CompletionException extends RuntimeException {
-        public CompletionException() {
+    public static class TransactionCompletionException extends RuntimeException {
+        public TransactionCompletionException() {
             super();
         }
 
-        public CompletionException(Throwable throwable) {
+        public TransactionCompletionException(Throwable throwable) {
             super(throwable);
+        }
+        public TransactionCompletionException(String message) {
+            super(message);
         }
     }
     /**
      * Thrown if the resultant transaction would violate the dust rules (an output that's too small to be worthwhile).
      */
-    public static class DustySendRequested extends CompletionException {}
+    public static class DustySendRequested extends TransactionCompletionException {}
     /**
      * Thrown if there is more than one OP_RETURN output for the resultant transaction.
      */
-    public static class MultipleOpReturnRequested extends CompletionException {}
+    public static class MultipleOpReturnRequested extends TransactionCompletionException {}
     /**
      * Thrown when we were trying to empty the wallet, and the total amount of money we were trying to empty after
      * being reduced for the fee was smaller than the min payment. Note that the missing field will be null in this
      * case.
      */
-    public static class CouldNotAdjustDownwards extends CompletionException {}
+    public static class CouldNotAdjustDownwards extends TransactionCompletionException {
+        CouldNotAdjustDownwards() {
+            super();
+        }
+        CouldNotAdjustDownwards(Coin value, Coin nonDustAmout) {
+            super(String.format("Value %s is below non-dust threshold of %s", value.toFriendlyString(), nonDustAmout.toFriendlyString()));
+        }
+    }
     /**
      * Thrown if the resultant transaction is too big for Bitcoin to process. Try breaking up the amounts of value.
      */
-    public static class ExceededMaxTransactionSize extends CompletionException {}
+    public static class ExceededMaxTransactionSize extends TransactionCompletionException {}
     /**
      * Thrown if the private keys and seed of this wallet cannot be decrypted due to the supplied encryption
      * key or password being wrong.
      */
-    public static class BadWalletEncryptionKeyException extends CompletionException {
+    public static class BadWalletEncryptionKeyException extends TransactionCompletionException {
         public BadWalletEncryptionKeyException(Throwable throwable) {
             super(throwable);
         }
@@ -4186,71 +4338,78 @@ public class Wallet extends BaseTaggableObject
      * @throws MultipleOpReturnRequested if there is more than one OP_RETURN output for the resultant transaction.
      * @throws BadWalletEncryptionKeyException if the supplied {@link SendRequest#aesKey} is wrong.
      */
-    public void completeTx(SendRequest req) throws InsufficientMoneyException, BadWalletEncryptionKeyException {
+    public void completeTx(SendRequest req) throws InsufficientMoneyException, TransactionCompletionException {
         lock.lock();
         try {
-            checkArgument(!req.completed, "Given SendRequest has already been completed.");
-            // Calculate the amount of value we need to import.
-            Coin value = Coin.ZERO;
-            for (TransactionOutput output : req.tx.getOutputs()) {
-                value = value.add(output.getValue());
-            }
+            checkArgument(!req.completed, () ->
+                    "given SendRequest has already been completed");
 
             log.info("Completing send tx with {} outputs totalling {} and a fee of {}/vkB", req.tx.getOutputs().size(),
-                    value.toFriendlyString(), req.feePerKb.toFriendlyString());
-
-            // If any inputs have already been added, we don't need to get their value from wallet
-            Coin totalInput = Coin.ZERO;
-            for (TransactionInput input : req.tx.getInputs())
-                if (input.getConnectedOutput() != null)
-                    totalInput = totalInput.add(input.getConnectedOutput().getValue());
-                else
-                    log.warn("SendRequest transaction already has inputs but we don't know how much they are worth - they will be added to fee.");
-            value = value.subtract(totalInput);
-
-            List<TransactionInput> originalInputs = new ArrayList<>(req.tx.getInputs());
-
-            // Check for dusty sends and the OP_RETURN limit.
-            if (req.ensureMinRequiredFee && !req.emptyWallet) { // Min fee checking is handled later for emptyWallet.
-                int opReturnCount = 0;
-                for (TransactionOutput output : req.tx.getOutputs()) {
-                    if (output.isDust())
-                        throw new DustySendRequested();
-                    if (ScriptPattern.isOpReturn(output.getScriptPubKey()))
-                        ++opReturnCount;
-                }
-                if (opReturnCount > 1) // Only 1 OP_RETURN per transaction allowed.
-                    throw new MultipleOpReturnRequested();
-            }
+                    req.tx.getOutputSum().toFriendlyString(), req.feePerKb.toFriendlyString());
 
             // Calculate a list of ALL potential candidates for spending and then ask a coin selector to provide us
             // with the actual outputs that'll be used to gather the required amount of value. In this way, users
             // can customize coin selection policies. The call below will ignore immature coinbases and outputs
             // we don't have the keys for.
-            List<TransactionOutput> candidates = calculateAllSpendCandidates(true, req.missingSigsMode == MissingSigsMode.THROW);
+            List<TransactionOutput> prelimCandidates = calculateAllSpendCandidates(true, req.missingSigsMode == MissingSigsMode.THROW);
+
+            // Connect (add a value amount) unconnected inputs
+            List<TransactionInput> inputs = connectInputs(prelimCandidates, req.tx.getInputs());
+            req.tx.clearInputs();
+            inputs.forEach(req.tx::addInput);
+
+            // Warn if there are remaining unconnected inputs whose value we do not know
+            // TODO: Consider throwing if there are inputs that we don't have a value for
+            if (req.tx.getInputs().stream()
+                    .map(TransactionInput::getValue)
+                    .anyMatch(Objects::isNull))
+                log.warn("SendRequest transaction already has inputs but we don't know how much they are worth - they will be added to fee.");
+
+            // If any inputs have already been added, we don't need to get their value from wallet
+            Coin totalInput = req.tx.getInputSum();
+            // Calculate the amount of value we need to import.
+            Coin valueNeeded = req.tx.getOutputSum().subtract(totalInput);
+
+            // Enforce the OP_RETURN limit
+            if (req.tx.getOutputs().stream()
+                    .filter(o -> ScriptPattern.isOpReturn(o.getScriptPubKey()))
+                    .count() > 1) // Only 1 OP_RETURN per transaction allowed.
+                throw new MultipleOpReturnRequested();
+
+            // Check for dusty sends
+            if (req.ensureMinRequiredFee && !req.emptyWallet) { // Min fee checking is handled later for emptyWallet.
+                if (req.tx.getOutputs().stream().anyMatch(TransactionOutput::isDust))
+                    throw new DustySendRequested();
+            }
+
+            // Filter out candidates that are already included in the transaction inputs
+            List<TransactionOutput> candidates = prelimCandidates.stream()
+                    .filter(output -> alreadyIncluded(req.tx.getInputs(), output))
+                    .collect(StreamUtils.toUnmodifiableList());
 
             CoinSelection bestCoinSelection;
             TransactionOutput bestChangeOutput = null;
             List<Coin> updatedOutputValues = null;
             if (!req.emptyWallet) {
                 // This can throw InsufficientMoneyException.
-                FeeCalculation feeCalculation = calculateFee(req, value, originalInputs, req.ensureMinRequiredFee, candidates);
+                FeeCalculation feeCalculation = calculateFee(req, valueNeeded, req.ensureMinRequiredFee, candidates);
                 bestCoinSelection = feeCalculation.bestCoinSelection;
                 bestChangeOutput = feeCalculation.bestChangeOutput;
                 updatedOutputValues = feeCalculation.updatedOutputValues;
             } else {
                 // We're being asked to empty the wallet. What this means is ensuring "tx" has only a single output
                 // of the total value we can currently spend as determined by the selector, and then subtracting the fee.
-                checkState(req.tx.getOutputs().size() == 1, "Empty wallet TX must have a single output only.");
+                checkState(req.tx.getOutputs().size() == 1, () ->
+                        "empty wallet TX must have a single output only");
                 CoinSelector selector = req.coinSelector == null ? coinSelector : req.coinSelector;
-                bestCoinSelection = selector.select(params.getMaxMoney(), candidates);
+                bestCoinSelection = selector.select((Coin) network.maxMoney(), candidates);
                 candidates = null;  // Selector took ownership and might have changed candidates. Don't access again.
-                req.tx.getOutput(0).setValue(bestCoinSelection.valueGathered);
-                log.info("  emptying {}", bestCoinSelection.valueGathered.toFriendlyString());
+                req.tx.replaceOutput(0, req.tx.getOutput(0).withValue(bestCoinSelection.totalValue()));
+                log.info("  emptying {}", bestCoinSelection.totalValue().toFriendlyString());
             }
 
-            for (TransactionOutput output : bestCoinSelection.gathered)
-                req.tx.addInput(output);
+            bestCoinSelection.outputs()
+                    .forEach(req.tx::addInput);
 
             if (req.emptyWallet) {
                 if (!adjustOutputDownwardsForFee(req.tx, bestCoinSelection, req.feePerKb, req.ensureMinRequiredFee))
@@ -4259,7 +4418,7 @@ public class Wallet extends BaseTaggableObject
 
             if (updatedOutputValues != null) {
                 for (int i = 0; i < updatedOutputValues.size(); i++) {
-                    req.tx.getOutput(i).setValue(updatedOutputValues.get(i));
+                    req.tx.replaceOutput(i, req.tx.getOutput(i).withValue(updatedOutputValues.get(i)));
                 }
             }
 
@@ -4277,14 +4436,14 @@ public class Wallet extends BaseTaggableObject
                 signTransaction(req);
 
             // Check size.
-            final int size = req.tx.unsafeBitcoinSerialize().length;
+            final int size = req.tx.messageSize();
             if (size > Transaction.MAX_STANDARD_TX_SIZE)
                 throw new ExceededMaxTransactionSize();
 
             // Label the transaction as being self created. We can use this later to spend its change output even before
             // the transaction is confirmed. We deliberately won't bother notifying listeners here as there's not much
             // point - the user isn't interested in a confidence transition they made themselves.
-            req.tx.getConfidence().setSource(TransactionConfidence.Source.SELF);
+            getConfidence(req.tx).setSource(TransactionConfidence.Source.SELF);
             // Label the transaction as being a user requested payment. This can be used to render GUI wallet
             // transaction lists more appropriately, especially when the wallet starts to generate transactions itself
             // for internal purposes.
@@ -4297,6 +4456,33 @@ public class Wallet extends BaseTaggableObject
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Connect unconnected inputs with outputs from the wallet
+     * @param candidates A list of spend candidates from a Wallet
+     * @param inputs a list of possibly unconnected/unvalued inputs (e.g. from a spend request)
+     * @return a list of the same inputs, but connected/valued if not previously valued and found in wallet
+     */
+    // For testing only
+    static List<TransactionInput> connectInputs(List<TransactionOutput> candidates, List<TransactionInput> inputs) {
+        return inputs.stream()
+                .map(in -> candidates.stream()
+                        .filter(utxo -> utxo.getOutPointFor().equals(in.getOutpoint()))
+                        .findFirst()
+                        .map(o -> new TransactionInput(o.getParentTransaction(), o.getScriptPubKey().program(), o.getOutPointFor(), o.getValue()))
+                        .orElse(in))
+                .collect(StreamUtils.toUnmodifiableList());
+    }
+
+    /**
+     * Is a UTXO already included (to be spent) in a list of transaction inputs?
+     * @param inputs the list of inputs to check
+     * @param output the transaction output
+     * @return true if it is already included, false otherwise
+     */
+    private boolean alreadyIncluded(List<TransactionInput> inputs, TransactionOutput output) {
+        return inputs.stream().noneMatch(i -> i.getOutpoint().equals(output.getOutPointFor()));
     }
 
     /**
@@ -4331,8 +4517,8 @@ public class Wallet extends BaseTaggableObject
                     // We assume if its already signed, its hopefully got a SIGHASH type that will not invalidate when
                     // we sign missing pieces (to check this would require either assuming any signatures are signing
                     // standard output types or a way to get processed signatures out of script execution)
-                    txIn.getScriptSig().correctlySpends(tx, i, txIn.getWitness(), connectedOutput.getValue(),
-                            connectedOutput.getScriptPubKey(), Script.ALL_VERIFY_FLAGS);
+                    ScriptExecution.correctlySpends(txIn.getScriptSig(), tx, i, txIn.getWitness(), connectedOutput.getValue(),
+                            connectedOutput.getScriptPubKey(), ScriptExecution.ALL_VERIFY_FLAGS);
                     log.warn("Input {} already correctly spends output, assuming SIGHASH type used will be safe and skipping signing.", i);
                     continue;
                 } catch (ScriptException e) {
@@ -4341,9 +4527,10 @@ public class Wallet extends BaseTaggableObject
                 }
 
                 RedeemData redeemData = txIn.getConnectedRedeemData(maybeDecryptingKeyBag);
-                checkNotNull(redeemData, "Transaction exists in wallet that we cannot redeem: %s", txIn.getOutpoint().getHash());
-                txIn.setScriptSig(scriptPubKey.createEmptyInputScript(redeemData.keys.get(0), redeemData.redeemScript));
-                txIn.setWitness(scriptPubKey.createEmptyWitness(redeemData.keys.get(0)));
+                Objects.requireNonNull(redeemData, () ->
+                        "Transaction exists in wallet that we cannot redeem: " + txIn.getOutpoint().hash());
+                tx.replaceInput(i, txIn.withScriptSig(scriptPubKey.createEmptyInputScript(redeemData.keys.get(0),
+                        redeemData.redeemScript)));
             }
 
             TransactionSigner.ProposedTransaction proposal = new TransactionSigner.ProposedTransaction(tx);
@@ -4363,16 +4550,15 @@ public class Wallet extends BaseTaggableObject
 
     /**
      * Reduce the value of the first output of a transaction to pay the given feePerKb as appropriate for its size.
-     * If ensureMinRequiredFee is true, feePerKb is set to at least {@link Transaction#REFERENCE_DEFAULT_MIN_TX_FEE}.
+     * If ensureMinRequiredFee is true, feePerKb is set to at least {@link Transaction#REFERENCE_DEFAULT_MIN_TX_FEE_RATE}.
+     * @return true if output is not dust
      */
     private boolean adjustOutputDownwardsForFee(Transaction tx, CoinSelection coinSelection, Coin feePerKb,
             boolean ensureMinRequiredFee) {
-        if (ensureMinRequiredFee && feePerKb.compareTo(Transaction.REFERENCE_DEFAULT_MIN_TX_FEE) < 0)
-            feePerKb = Transaction.REFERENCE_DEFAULT_MIN_TX_FEE;
-        final int vsize = tx.getVsize() + estimateVirtualBytesForSigning(coinSelection);
-        Coin fee = feePerKb.multiply(vsize).divide(1000);
+        Coin fee = estimateFees(tx, coinSelection, feePerKb, ensureMinRequiredFee);
         TransactionOutput output = tx.getOutput(0);
-        output.setValue(output.getValue().subtract(fee));
+        output = output.withValue(output.getValue().subtract(fee));
+        tx.replaceOutput(0, output);
         return !output.isDust();
     }
 
@@ -4397,16 +4583,12 @@ public class Wallet extends BaseTaggableObject
         try {
             List<TransactionOutput> candidates;
             if (vUTXOProvider == null) {
-                candidates = new ArrayList<>(myUnspents.size());
-                for (TransactionOutput output : myUnspents) {
-                    if (excludeUnsignable && !canSignFor(output.getScriptPubKey())) continue;
-                    Transaction transaction = checkNotNull(output.getParentTransaction());
-                    if (excludeImmatureCoinbases && !transaction.isMature())
-                        continue;
-                    candidates.add(output);
-                }
+                candidates = myUnspents.stream()
+                    .filter(output ->   (!excludeUnsignable || canSignFor(output.getScriptPubKey())) &&
+                                        (!excludeImmatureCoinbases || isTransactionMature(output.getParentTransaction())))
+                    .collect(StreamUtils.toUnmodifiableList());
             } else {
-                candidates = calculateAllSpendCandidatesFromUTXOProvider(excludeImmatureCoinbases);
+                candidates = calculateAllSpendCandidatesFromUTXOProviderInternal(excludeImmatureCoinbases);
             }
             return candidates;
         } finally {
@@ -4428,11 +4610,11 @@ public class Wallet extends BaseTaggableObject
             return data != null && canSignFor(data.redeemScript);
         } else if (ScriptPattern.isP2PKH(script)) {
             ECKey key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2PKH(script),
-                    Script.ScriptType.P2PKH);
+                    ScriptType.P2PKH);
             return key != null && (key.isEncrypted() || key.hasPrivKey());
         } else if (ScriptPattern.isP2WPKH(script)) {
             ECKey key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2WH(script),
-                    Script.ScriptType.P2WPKH);
+                    ScriptType.P2WPKH);
             return key != null && (key.isEncrypted() || key.hasPrivKey()) && key.isCompressed();
         } else if (ScriptPattern.isSentToMultisig(script)) {
             for (ECKey pubkey : script.getPubKeys()) {
@@ -4448,23 +4630,29 @@ public class Wallet extends BaseTaggableObject
      * Returns the spendable candidates from the {@link UTXOProvider} based on keys that the wallet contains.
      * @return The list of candidates.
      */
-    protected LinkedList<TransactionOutput> calculateAllSpendCandidatesFromUTXOProvider(boolean excludeImmatureCoinbases) {
+    @Deprecated
+    protected List<TransactionOutput> calculateAllSpendCandidatesFromUTXOProvider(boolean excludeImmatureCoinbases) {
+        return calculateAllSpendCandidatesFromUTXOProviderInternal(excludeImmatureCoinbases);
+    }
+
+    private List<TransactionOutput> calculateAllSpendCandidatesFromUTXOProviderInternal(boolean excludeImmatureCoinbases) {
         checkState(lock.isHeldByCurrentThread());
-        UTXOProvider utxoProvider = checkNotNull(vUTXOProvider, "No UTXO provider has been set");
-        LinkedList<TransactionOutput> candidates = new LinkedList<>();
+        UTXOProvider utxoProvider = Objects.requireNonNull(vUTXOProvider, "No UTXO provider has been set");
+        List<TransactionOutput> candidates = new LinkedList<>();
         try {
             int chainHeight = utxoProvider.getChainHeadHeight();
-            for (UTXO output : getStoredOutputsFromUTXOProvider()) {
+            for (UTXO output : getStoredOutputsFromUTXOProviderInternal()) {
                 boolean coinbase = output.isCoinbase();
                 int depth = chainHeight - output.getHeight() + 1; // the current depth of the output (1 = same as head).
                 // Do not try and spend coinbases that were mined too recently, the protocol forbids it.
                 if (!excludeImmatureCoinbases || !coinbase || depth >= params.getSpendableCoinbaseDepth()) {
-                    candidates.add(new FreeStandingTransactionOutput(params, output, chainHeight));
+                    candidates.add(new FreeStandingTransactionOutput(output, chainHeight));
                 }
             }
         } catch (UTXOProviderException e) {
             throw new RuntimeException("UTXO provider error", e);
         }
+
         // We need to handle the pending transactions that we know about.
         for (Transaction tx : pending.values()) {
             // Remove the spent outputs.
@@ -4474,7 +4662,7 @@ public class Wallet extends BaseTaggableObject
                 }
             }
             // Add change outputs. Do not try and spend coinbases that were mined too recently, the protocol forbids it.
-            if (!excludeImmatureCoinbases || tx.isMature()) {
+            if (!excludeImmatureCoinbases || isTransactionMature(tx)) {
                 for (TransactionOutput output : tx.getOutputs()) {
                     if (output.isAvailableForSpending() && output.isMine(this)) {
                         candidates.add(output);
@@ -4490,8 +4678,13 @@ public class Wallet extends BaseTaggableObject
      * wallet contains.
      * @return The list of stored outputs.
      */
+    @Deprecated
     protected List<UTXO> getStoredOutputsFromUTXOProvider() throws UTXOProviderException {
-        UTXOProvider utxoProvider = checkNotNull(vUTXOProvider, "No UTXO provider has been set");
+        return getStoredOutputsFromUTXOProviderInternal();
+    }
+
+    private List<UTXO> getStoredOutputsFromUTXOProviderInternal() throws UTXOProviderException {
+        UTXOProvider utxoProvider = Objects.requireNonNull(vUTXOProvider, "No UTXO provider has been set");
         List<UTXO> candidates = new ArrayList<>();
         List<ECKey> keys = getImportedKeys();
         keys.addAll(getActiveKeyChain().getLeafKeys());
@@ -4512,7 +4705,9 @@ public class Wallet extends BaseTaggableObject
     /**
      * Get the {@link UTXOProvider}.
      * @return The UTXO provider.
+     * @deprecated Use a UTXOProvider separate from the wallet if you want to search an external source for UTXOs.
      */
+    @Deprecated
     @Nullable public UTXOProvider getUTXOProvider() {
         lock.lock();
         try {
@@ -4530,11 +4725,18 @@ public class Wallet extends BaseTaggableObject
      *
      * <p>Note that the associated provider must be reattached after a wallet is loaded from disk.
      * The association is not serialized.</p>
+     * @deprecated Use a UTXOProvider separate from the wallet if you want to search an external source for UTXOs.
      */
+    @Deprecated
     public void setUTXOProvider(@Nullable UTXOProvider provider) {
+        setUTXOProviderInternal(provider);
+    }
+
+    @VisibleForTesting
+    public void setUTXOProviderInternal(@Nullable UTXOProvider provider) {
         lock.lock();
         try {
-            checkArgument(provider == null || provider.getParams().equals(params));
+            checkArgument(provider == null || provider.network() == network);
             this.vUTXOProvider = provider;
         } finally {
             lock.unlock();
@@ -4545,21 +4747,20 @@ public class Wallet extends BaseTaggableObject
 
     // ***************************************************************************************************************
     /**
-     * A custom {@link TransactionOutput} that is free standing. This contains all the information
+     * A custom {@link TransactionOutput} that is freestanding. This contains all the information
      * required for spending without actually having all the linked data (i.e parent tx).
      *
      */
-    private class FreeStandingTransactionOutput extends TransactionOutput {
-        private UTXO output;
-        private int chainHeight;
+    private static class FreeStandingTransactionOutput extends TransactionOutput {
+        private final UTXO output;
+        private final int chainHeight;
 
         /**
-         * Construct a free standing Transaction Output.
-         * @param params The network parameters.
-         * @param output The stored output (free standing).
+         * Construct a freestanding Transaction Output.
+         * @param output The stored output (freestanding).
          */
-        public FreeStandingTransactionOutput(NetworkParameters params, UTXO output, int chainHeight) {
-            super(params, null, output.getValue(), output.getScript().getProgram());
+        public FreeStandingTransactionOutput(UTXO output, int chainHeight) {
+            super(null, output.getValue(), output.getScript().program());
             this.output = output;
             this.chainHeight = chainHeight;
         }
@@ -4639,23 +4840,25 @@ public class Wallet extends BaseTaggableObject
             // because there are so many ways the block can be invalid.
 
             // Avoid spuriously informing the user of wallet/tx confidence changes whilst we're re-organizing.
-            checkState(confidenceChanged.size() == 0);
+            checkState(confidenceChanged.isEmpty());
             checkState(!insideReorg);
             insideReorg = true;
             checkState(onWalletChangedSuppressions == 0);
             onWalletChangedSuppressions++;
 
-            // Map block hash to transactions that appear in it. We ensure that the map values are sorted according
-            // to their relative position within those blocks.
-            ArrayListMultimap<Sha256Hash, TxOffsetPair> mapBlockTx = ArrayListMultimap.create();
+            // Map block hash to transactions that appear in it. We ensure that the map values (lists) are
+            // sorted according to their relative position within those blocks, by sorting each list
+            // with our custom TxOffsetPair.compareTo().
+            Map<Sha256Hash, List<TxOffsetPair>> mapBlockTx = new HashMap<>();
             for (Transaction tx : getTransactions(true)) {
                 Map<Sha256Hash, Integer> appearsIn = tx.getAppearsInHashes();
                 if (appearsIn == null) continue;  // Pending.
                 for (Map.Entry<Sha256Hash, Integer> block : appearsIn.entrySet())
-                    mapBlockTx.put(block.getKey(), new TxOffsetPair(tx, block.getValue()));
+                    mapBlockTx.computeIfAbsent(block.getKey(), k -> new ArrayList<>())
+                            .add(new TxOffsetPair(tx, block.getValue()));
             }
             for (Sha256Hash blockHash : mapBlockTx.keySet())
-                Collections.sort(mapBlockTx.get(blockHash));
+                Collections.sort(mapBlockTx.get(blockHash));    // Sort each List<TxOffsetPair>>
 
             List<Sha256Hash> oldBlockHashes = new ArrayList<>(oldBlocks.size());
             log.info("Old part of chain (top to bottom):");
@@ -4671,9 +4874,9 @@ public class Wallet extends BaseTaggableObject
             Collections.reverse(newBlocks);  // Need bottom-to-top but we get top-to-bottom.
 
             // For each block in the old chain, disconnect the transactions in reverse order.
-            LinkedList<Transaction> oldChainTxns = new LinkedList<>();
+            List<Transaction> oldChainTxns = new LinkedList<>();
             for (Sha256Hash blockHash : oldBlockHashes) {
-                for (TxOffsetPair pair : mapBlockTx.get(blockHash)) {
+                for (TxOffsetPair pair : mapBlockTx.getOrDefault(blockHash, Collections.emptyList())) {
                     Transaction tx = pair.tx;
                     final Sha256Hash txHash = tx.getTxId();
                     if (tx.isCoinBase()) {
@@ -4686,7 +4889,7 @@ public class Wallet extends BaseTaggableObject
                         // this coinbase tx. Some can just go pending forever, like the Bitcoin Core. However we
                         // can do our best.
                         log.warn("Coinbase killed by re-org: {}", tx.getTxId());
-                        killTxns(ImmutableSet.of(tx), null);
+                        killTxns(Collections.singleton(tx), null);
                     } else {
                         for (TransactionOutput output : tx.getOutputs()) {
                             TransactionInput input = output.getSpentBy();
@@ -4712,7 +4915,7 @@ public class Wallet extends BaseTaggableObject
                 if (tx.isCoinBase()) continue;
                 log.info("  ->pending {}", tx.getTxId());
 
-                tx.getConfidence().setConfidenceType(ConfidenceType.PENDING);  // Wipe height/depth/work data.
+                getConfidence(tx).setConfidenceType(ConfidenceType.PENDING);  // Wipe height/depth/work data.
                 confidenceChanged.put(tx, TransactionConfidence.Listener.ChangeReason.TYPE);
                 addWalletTransaction(Pool.PENDING, tx);
                 updateForSpends(tx, false);
@@ -4742,7 +4945,7 @@ public class Wallet extends BaseTaggableObject
             // conflict.
             for (StoredBlock block : newBlocks) {
                 log.info("Replaying block {}", block.getHeader().getHashAsString());
-                for (TxOffsetPair pair : mapBlockTx.get(block.getHeader().getHash())) {
+                for (TxOffsetPair pair : mapBlockTx.getOrDefault(block.getHeader().getHash(), Collections.emptyList())) {
                     log.info("  tx {}", pair.tx.getTxId());
                     try {
                         receive(pair.tx, block, BlockChain.NewBlockType.BEST_CHAIN, pair.offset);
@@ -4760,7 +4963,7 @@ public class Wallet extends BaseTaggableObject
             insideReorg = false;
             onWalletChangedSuppressions--;
             maybeQueueOnWalletChanged();
-            checkBalanceFuturesLocked(balance);
+            checkBalanceFuturesLocked();
             informConfidenceListenersIfNotReorganizing();
             saveLater();
         } finally {
@@ -4773,8 +4976,8 @@ public class Wallet extends BaseTaggableObject
      */
     private void subtractDepth(int depthToSubtract, Collection<Transaction> transactions) {
         for (Transaction tx : transactions) {
-            if (tx.getConfidence().getConfidenceType() == ConfidenceType.BUILDING) {
-                tx.getConfidence().setDepthInBlocks(tx.getConfidence().getDepthInBlocks() - depthToSubtract);
+            if (getConfidence(tx).getConfidenceType() == ConfidenceType.BUILDING) {
+                getConfidence(tx).setDepthInBlocks(getConfidence(tx).getDepthInBlocks() - depthToSubtract);
                 confidenceChanged.put(tx, TransactionConfidence.Listener.ChangeReason.DEPTH);
             }
         }
@@ -4786,7 +4989,7 @@ public class Wallet extends BaseTaggableObject
 
     //region Bloom filtering
 
-    private final ArrayList<TransactionOutPoint> bloomOutPoints = new ArrayList<>();
+    private final List<TransactionOutPoint> bloomOutPoints = new ArrayList<>();
     // Used to track whether we must automatically begin/end a filter calculation and calc outpoints/take the locks.
     private final AtomicInteger bloomFilterGuard = new AtomicInteger(0);
 
@@ -4803,21 +5006,15 @@ public class Wallet extends BaseTaggableObject
     private void calcBloomOutPointsLocked() {
         // TODO: This could be done once and then kept up to date.
         bloomOutPoints.clear();
-        Set<Transaction> all = new HashSet<>();
-        all.addAll(unspent.values());
-        all.addAll(spent.values());
-        all.addAll(pending.values());
-        for (Transaction tx : all) {
-            for (TransactionOutput out : tx.getOutputs()) {
-                try {
-                    if (isTxOutputBloomFilterable(out))
-                        bloomOutPoints.add(out.getOutPointFor());
-                } catch (ScriptException e) {
-                    // If it is ours, we parsed the script correctly, so this shouldn't happen.
-                    throw new RuntimeException(e);
-                }
-            }
-        }
+        // Search unspent, spent, and pending for all TransactionOutputs that are bloom filterable and
+        // then collect a list of the corresponding TransactionOutPoints.
+        List<TransactionOutPoint> outPoints = Stream.of(unspent.values(), spent.values(), pending.values())
+                .flatMap(Collection::stream)
+                .flatMap(tx -> tx.getOutputs().stream())
+                .filter(this::isTxOutputBloomFilterable)
+                .map(TransactionOutput::getOutPointFor)
+                .collect(Collectors.toList());
+        bloomOutPoints.addAll(outPoints);
     }
 
     @Override @GuardedBy("keyChainGroupLock")
@@ -4855,7 +5052,7 @@ public class Wallet extends BaseTaggableObject
     public BloomFilter getBloomFilter(double falsePositiveRate) {
         beginBloomFilterCalculation();
         try {
-            return getBloomFilter(getBloomFilterElementCount(), falsePositiveRate, (long) (Math.random() * Long.MAX_VALUE));
+            return getBloomFilter(getBloomFilterElementCount(), falsePositiveRate, new Random().nextInt());
         } finally {
             endBloomFilterCalculation();
         }
@@ -4869,21 +5066,21 @@ public class Wallet extends BaseTaggableObject
      * <p>This is used to generate a BloomFilter which can be {@link BloomFilter#merge(BloomFilter)}d with another.
      * It could also be used if you have a specific target for the filter's size.</p>
      * 
-     * <p>See the docs for {@link BloomFilter#BloomFilter(int, double, long, BloomFilter.BloomUpdate)} for a brief explanation of anonymity when using bloom
+     * <p>See the docs for {@link BloomFilter#BloomFilter(int, double, int, BloomFilter.BloomUpdate)} for a brief explanation of anonymity when using bloom
      * filters.</p>
      */
     @Override @GuardedBy("keyChainGroupLock")
-    public BloomFilter getBloomFilter(int size, double falsePositiveRate, long nTweak) {
+    public BloomFilter getBloomFilter(int size, double falsePositiveRate, int nTweak) {
         beginBloomFilterCalculation();
         try {
             BloomFilter filter = keyChainGroup.getBloomFilter(size, falsePositiveRate, nTweak);
             for (Script script : watchedScripts) {
-                for (ScriptChunk chunk : script.getChunks()) {
+                for (ScriptChunk chunk : script.chunks()) {
                     // Only add long (at least 64 bit) data to the bloom filter.
                     // If any long constants become popular in scripts, we will need logic
                     // here to exclude them.
-                    if (!chunk.isOpCode() && (chunk.data != null) && chunk.data.length >= MINIMUM_BLOOM_DATA_LENGTH) {
-                        filter.insert(chunk.data);
+                    if (!chunk.isOpCode() && (chunk.pushData() != null) && chunk.pushData().length >= MINIMUM_BLOOM_DATA_LENGTH) {
+                        filter.insert(chunk.pushData());
                     }
                 }
             }
@@ -4911,7 +5108,7 @@ public class Wallet extends BaseTaggableObject
     public boolean checkForFilterExhaustion(FilteredBlock block) {
         keyChainGroupLock.lock();
         try {
-            if (!keyChainGroup.isSupportsDeterministicChains())
+            if (!keyChainGroup.supportsDeterministicChains())
                 return false;
             int epoch = keyChainGroup.getCombinedKeyLookaheadEpochs();
             for (Transaction tx : block.getAssociatedTransactions().values()) {
@@ -4940,7 +5137,7 @@ public class Wallet extends BaseTaggableObject
      * add the same extension twice (or two different objects that use the same ID) will throw an IllegalStateException.
      */
     public void addExtension(WalletExtension extension) {
-        String id = checkNotNull(extension).getWalletExtensionID();
+        String id = Objects.requireNonNull(extension).getWalletExtensionID();
         lock.lock();
         try {
             if (extensions.containsKey(id))
@@ -4956,7 +5153,7 @@ public class Wallet extends BaseTaggableObject
      * Atomically adds extension or returns an existing extension if there is one with the same id already present.
      */
     public WalletExtension addOrGetExistingExtension(WalletExtension extension) {
-        String id = checkNotNull(extension).getWalletExtensionID();
+        String id = Objects.requireNonNull(extension).getWalletExtensionID();
         lock.lock();
         try {
             WalletExtension previousExtension = extensions.get(id);
@@ -4976,7 +5173,7 @@ public class Wallet extends BaseTaggableObject
      * already present.
      */
     public void addOrUpdateExtension(WalletExtension extension) {
-        String id = checkNotNull(extension).getWalletExtensionID();
+        String id = Objects.requireNonNull(extension).getWalletExtensionID();
         lock.lock();
         try {
             extensions.put(id, extension);
@@ -4990,7 +5187,7 @@ public class Wallet extends BaseTaggableObject
     public Map<String, WalletExtension> getExtensions() {
         lock.lock();
         try {
-            return ImmutableMap.copyOf(extensions);
+            return Collections.unmodifiableMap(new HashMap<>(extensions));
         } finally {
             lock.unlock();
         }
@@ -5018,6 +5215,9 @@ public class Wallet extends BaseTaggableObject
         }
     }
 
+    /**
+     * @deprecated Applications should use another mechanism to persist application state information
+     */
     @Override
     public void setTag(String tag, ByteString value) {
         super.setTag(tag, value);
@@ -5039,37 +5239,35 @@ public class Wallet extends BaseTaggableObject
 
     //region Fee calculation code
 
-    private FeeCalculation calculateFee(SendRequest req, Coin value, List<TransactionInput> originalInputs,
-                                       boolean needAtLeastReferenceFee, List<TransactionOutput> candidates) throws InsufficientMoneyException {
+    private FeeCalculation calculateFee(SendRequest req, Coin value, boolean needAtLeastReferenceFee, List<TransactionOutput> candidates) throws InsufficientMoneyException {
         checkState(lock.isHeldByCurrentThread());
         FeeCalculation result;
         Coin fee = Coin.ZERO;
         while (true) {
             result = new FeeCalculation();
-            Transaction tx = new Transaction(params);
+            Transaction tx = new Transaction();
             addSuppliedInputs(tx, req.tx.getInputs());
 
-            Coin valueNeeded = value;
-            if (!req.recipientsPayFees) {
-                valueNeeded = valueNeeded.add(fee);
-            }
+            Coin valueNeeded = req.recipientsPayFees ? value : value.add(fee);
             if (req.recipientsPayFees) {
                 result.updatedOutputValues = new ArrayList<>();
             }
             for (int i = 0; i < req.tx.getOutputs().size(); i++) {
-                TransactionOutput output = new TransactionOutput(params, tx,
-                        req.tx.getOutputs().get(i).bitcoinSerialize(), 0);
+                TransactionOutput output = TransactionOutput.read(
+                        ByteBuffer.wrap(req.tx.getOutput(i).serialize()), tx);
                 if (req.recipientsPayFees) {
                     // Subtract fee equally from each selected recipient
-                    output.setValue(output.getValue().subtract(fee.divide(req.tx.getOutputs().size())));
+                    output = output.withValue(output.getValue().subtract(fee.divide(req.tx.getOutputs().size())));
                     // first receiver pays the remainder not divisible by output count
                     if (i == 0) {
-                        output.setValue(
-                                output.getValue().subtract(fee.divideAndRemainder(req.tx.getOutputs().size())[1])); // Subtract fee equally from each selected recipient
+                        // Subtract fee equally from each selected recipient
+                        Coin feeRemainder = fee.divideAndRemainder(req.tx.getOutputs().size())[1];
+                        output = output.withValue(output.getValue().subtract(feeRemainder));
                     }
                     result.updatedOutputValues.add(output.getValue());
-                    if (output.getMinNonDustValue().isGreaterThan(output.getValue())) {
-                        throw new CouldNotAdjustDownwards();
+                    Coin nonDustValue = output.getMinNonDustValue();
+                    if (output.getValue().isLessThan(nonDustValue)) {
+                        throw new CouldNotAdjustDownwards(output.getValue(), nonDustValue);
                     }
                 }
                 tx.addOutput(output);
@@ -5079,27 +5277,26 @@ public class Wallet extends BaseTaggableObject
             CoinSelection selection = selector.select(valueNeeded, new LinkedList<>(candidates));
             result.bestCoinSelection = selection;
             // Can we afford this?
-            if (selection.valueGathered.compareTo(valueNeeded) < 0) {
-                Coin valueMissing = valueNeeded.subtract(selection.valueGathered);
-                throw new InsufficientMoneyException(valueMissing);
+            if (selection.totalValue().compareTo(valueNeeded) < 0) {
+                Coin valueMissing = valueNeeded.subtract(selection.totalValue());
+                throw new InsufficientMoneyException(valueMissing, selection.totalValue(), value, fee);
             }
-            Coin change = selection.valueGathered.subtract(valueNeeded);
+            Coin change = selection.totalValue().subtract(valueNeeded);
             if (change.isGreaterThan(Coin.ZERO)) {
                 // The value of the inputs is greater than what we want to send. Just like in real life then,
                 // we need to take back some coins ... this is called "change". Add another output that sends the change
                 // back to us. The address comes either from the request or currentChangeAddress() as a default.
-                Address changeAddress = req.changeAddress;
-                if (changeAddress == null)
-                    changeAddress = currentChangeAddress();
-                TransactionOutput changeOutput = new TransactionOutput(params, tx, change, changeAddress);
+                Address changeAddress = (req.changeAddress != null) ? req.changeAddress : currentChangeAddress();
+                TransactionOutput changeOutput = new TransactionOutput(tx, change, changeAddress);
                 if (req.recipientsPayFees && changeOutput.isDust()) {
                     // We do not move dust-change to fees, because the sender would end up paying more than requested.
                     // This would be against the purpose of the all-inclusive feature.
                     // So instead we raise the change and deduct from the first recipient.
                     Coin missingToNotBeDust = changeOutput.getMinNonDustValue().subtract(changeOutput.getValue());
-                    changeOutput.setValue(changeOutput.getValue().add(missingToNotBeDust));
-                    TransactionOutput firstOutput = tx.getOutputs().get(0);
-                    firstOutput.setValue(firstOutput.getValue().subtract(missingToNotBeDust));
+                    changeOutput = changeOutput.withValue(changeOutput.getValue().add(missingToNotBeDust));
+                    TransactionOutput firstOutput = tx.getOutput(0);
+                    firstOutput = firstOutput.withValue(firstOutput.getValue().subtract(missingToNotBeDust));
+                    tx.replaceOutput(0, firstOutput);
                     result.updatedOutputValues.set(0, firstOutput.getValue());
                     if (firstOutput.isDust()) {
                         throw new CouldNotAdjustDownwards();
@@ -5119,19 +5316,14 @@ public class Wallet extends BaseTaggableObject
                 }
             }
 
-            for (TransactionOutput selectedOutput : selection.gathered) {
+            for (TransactionOutput selectedOutput : selection.outputs()) {
                 TransactionInput input = tx.addInput(selectedOutput);
                 // If the scriptBytes don't default to none, our size calculations will be thrown off.
                 checkState(input.getScriptBytes().length == 0);
                 checkState(!input.hasWitness());
             }
 
-            Coin feePerKb = req.feePerKb;
-            if (needAtLeastReferenceFee && feePerKb.compareTo(Transaction.REFERENCE_DEFAULT_MIN_TX_FEE) < 0)
-                feePerKb = Transaction.REFERENCE_DEFAULT_MIN_TX_FEE;
-
-            final int vsize = tx.getVsize() + estimateVirtualBytesForSigning(selection);
-            Coin feeNeeded = feePerKb.multiply(vsize).divide(1000);
+            Coin feeNeeded = estimateFees(tx, selection, req.feePerKb, needAtLeastReferenceFee);
 
             if (!fee.isLessThan(feeNeeded)) {
                 // Done, enough fee included.
@@ -5147,39 +5339,46 @@ public class Wallet extends BaseTaggableObject
 
     private void addSuppliedInputs(Transaction tx, List<TransactionInput> originalInputs) {
         for (TransactionInput input : originalInputs)
-            tx.addInput(new TransactionInput(params, tx, input.bitcoinSerialize()));
+            tx.addInput(TransactionInput.read(ByteBuffer.wrap(input.serialize()), tx));
     }
 
-    private int estimateVirtualBytesForSigning(CoinSelection selection) {
-        int vsize = 0;
-        for (TransactionOutput output : selection.gathered) {
-            try {
-                Script script = output.getScriptPubKey();
-                ECKey key = null;
-                Script redeemScript = null;
-                if (ScriptPattern.isP2PKH(script)) {
-                    key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2PKH(script), Script.ScriptType.P2PKH);
-                    checkNotNull(key, "Coin selection includes unspendable outputs");
-                    vsize += script.getNumberOfBytesRequiredToSpend(key, redeemScript);
-                } else if (ScriptPattern.isP2WPKH(script)) {
-                    key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2WH(script), Script.ScriptType.P2WPKH);
-                    checkNotNull(key, "Coin selection includes unspendable outputs");
-                    vsize += IntMath.divide(script.getNumberOfBytesRequiredToSpend(key, redeemScript), 4,
-                            RoundingMode.CEILING); // round up
-                } else if (ScriptPattern.isP2SH(script)) {
-                    redeemScript = findRedeemDataFromScriptHash(ScriptPattern.extractHashFromP2SH(script)).redeemScript;
-                    checkNotNull(redeemScript, "Coin selection includes unspendable outputs");
-                    vsize += script.getNumberOfBytesRequiredToSpend(key, redeemScript);
-                } else {
-                    vsize += script.getNumberOfBytesRequiredToSpend(key, redeemScript);
-                }
-            } catch (ScriptException e) {
-                // If this happens it means an output script in a wallet tx could not be understood. That should never
-                // happen, if it does it means the wallet has got into an inconsistent state.
-                throw new IllegalStateException(e);
+    private Coin estimateFees(Transaction tx, CoinSelection coinSelection, Coin requestedFeePerKb, boolean ensureMinRequiredFee) {
+        Coin feePerKb = (ensureMinRequiredFee && requestedFeePerKb.isLessThan(Transaction.REFERENCE_DEFAULT_MIN_TX_FEE_RATE))
+                ? Transaction.REFERENCE_DEFAULT_MIN_TX_FEE_RATE
+                : requestedFeePerKb;
+        int vSize = tx.getVsize() + estimateVirtualBytesForSigning(coinSelection.outputs());
+        return feePerKb.multiply(vSize).divide(1000);
+    }
+
+    private int estimateVirtualBytesForSigning(List<TransactionOutput> outputs) {
+        return outputs.stream()
+                .map(TransactionOutput::getScriptPubKey)
+                .mapToInt(this::estimateVirtualBytesForSigning)
+                .sum();
+    }
+
+    private int estimateVirtualBytesForSigning(Script script) {
+        try {
+            if (ScriptPattern.isP2PKH(script)) {
+                ECKey key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2PKH(script), ScriptType.P2PKH);
+                Objects.requireNonNull(key, "Coin selection includes unspendable outputs");
+                return script.getNumberOfBytesRequiredToSpend(key, null);
+            } else if (ScriptPattern.isP2WPKH(script)) {
+                ECKey key = findKeyFromPubKeyHash(ScriptPattern.extractHashFromP2WH(script), ScriptType.P2WPKH);
+                Objects.requireNonNull(key, "Coin selection includes unspendable outputs");
+                return Transaction.calculateVirtualTransactionSize(script.getNumberOfBytesRequiredToSpend(key, null));
+            } else if (ScriptPattern.isP2SH(script)) {
+                Script redeemScript = findRedeemDataFromScriptHash(ScriptPattern.extractHashFromP2SH(script)).redeemScript;
+                Objects.requireNonNull(redeemScript, "Coin selection includes unspendable outputs");
+                return script.getNumberOfBytesRequiredToSpend(null, redeemScript);
+            } else {
+                return script.getNumberOfBytesRequiredToSpend(null, null);
             }
+        } catch (ScriptException e) {
+            // If this happens it means an output script in a wallet tx could not be understood. That should never
+            // happen, if it does it means the wallet has got into an inconsistent state.
+            throw new IllegalStateException(e);
         }
-        return vsize;
     }
 
     //endregion
@@ -5208,7 +5407,7 @@ public class Wallet extends BaseTaggableObject
      * re-organisation of the wallet contents on the block chain. For instance, in future the wallet may choose to
      * optimise itself to reduce fees or improve privacy.</p>
      */
-    public void setTransactionBroadcaster(@Nullable org.bitcoinj.core.TransactionBroadcaster broadcaster) {
+    public void setTransactionBroadcaster(org.bitcoinj.core.@Nullable TransactionBroadcaster broadcaster) {
         Transaction[] toBroadcast = {};
         lock.lock();
         try {
@@ -5225,9 +5424,9 @@ public class Wallet extends BaseTaggableObject
         // Don't hold the wallet lock whilst doing this, so if the broadcaster accesses the wallet at some point there
         // is no inversion.
         for (Transaction tx : toBroadcast) {
-            ConfidenceType confidenceType = tx.getConfidence().getConfidenceType();
-            checkState(confidenceType == ConfidenceType.PENDING || confidenceType == ConfidenceType.IN_CONFLICT,
-                    "Expected PENDING or IN_CONFLICT, was %s.", confidenceType);
+            ConfidenceType confidenceType = getConfidence(tx).getConfidenceType();
+            checkState(confidenceType == ConfidenceType.PENDING || confidenceType == ConfidenceType.IN_CONFLICT, () ->
+                    "Tx " + tx.getTxId() + ": expected PENDING or IN_CONFLICT, was " + confidenceType);
             // Re-broadcast even if it's marked as already seen for two reasons
             // 1) Old wallets may have transactions marked as broadcast by 1 peer when in reality the network
             //    never saw it, due to bugs.
@@ -5244,31 +5443,9 @@ public class Wallet extends BaseTaggableObject
      * believed to be compromised. The rotation time is persisted to the wallet. You can stop key rotation by calling
      * this method again with {@code null} as the argument.
      * </p>
-     *
-     * <p>
-     * Once set up, calling {@link #doMaintenance(KeyParameter, boolean)} will create and possibly send rotation
-     * transactions: but it won't be done automatically (because you might have to ask for the users password). This may
-     * need to be repeated regularly in case new coins keep coming in on rotating addresses/keys.
-     * </p>
-     *
-     * <p>
-     * The given time cannot be in the future.
-     * </p>
-     */
-    public void setKeyRotationTime(@Nullable Date time) {
-        setKeyRotationTime(time != null ? time.getTime() / 1000 : 0);
-    }
-
-    /**
-     * <p>
-     * When a key rotation time is set, any money controlled by keys created before the given timestamp T will be
-     * respent to any key that was created after T. This can be used to recover from a situation where a set of keys is
-     * believed to be compromised. The rotation time is persisted to the wallet. You can stop key rotation by calling
-     * this method again with {@code 0} as the argument.
-     * </p>
      * 
      * <p>
-     * Once set up, calling {@link #doMaintenance(KeyParameter, boolean)} will create and possibly send rotation
+     * Once set up, calling {@link #doMaintenance(AesKey, boolean)} will create and possibly send rotation
      * transactions: but it won't be done automatically (because you might have to ask for the users password). This may
      * need to be repeated regularly in case new coins keep coming in on rotating addresses/keys.
      * </p>
@@ -5276,30 +5453,27 @@ public class Wallet extends BaseTaggableObject
      * <p>
      * The given time cannot be in the future.
      * </p>
+     * @param keyRotationTime rotate any keys created before this time, or null for no rotation
      */
-    public void setKeyRotationTime(long unixTimeSeconds) {
-        checkArgument(unixTimeSeconds <= Utils.currentTimeSeconds(), "Given time (%s) cannot be in the future.",
-                Utils.dateTimeFormat(unixTimeSeconds * 1000));
-        vKeyRotationTimestamp = unixTimeSeconds;
+    public void setKeyRotationTime(@Nullable Instant keyRotationTime) {
+        checkArgument(keyRotationTime == null || keyRotationTime.compareTo(TimeUtils.currentTime()) <= 0, () ->
+                "given time cannot be in the future: " + TimeUtils.dateTimeFormat(keyRotationTime));
+        vKeyRotationTime = keyRotationTime;
         saveNow();
     }
 
     /**
-     * Returns the key rotation time, or null if unconfigured. See {@link #setKeyRotationTime(Date)} for a description
+     * Returns the key rotation time, or empty if unconfigured. See {@link #setKeyRotationTime(Instant)} for a description
      * of the field.
      */
-    public @Nullable Date getKeyRotationTime() {
-        final long keyRotationTimestamp = vKeyRotationTimestamp;
-        if (keyRotationTimestamp != 0)
-            return new Date(keyRotationTimestamp * 1000);
-        else
-            return null;
+    public Optional<Instant> keyRotationTime() {
+        return Optional.ofNullable(vKeyRotationTime);
     }
 
     /** Returns whether the keys creation time is before the key rotation time, if one was set. */
     public boolean isKeyRotating(ECKey key) {
-        long time = vKeyRotationTimestamp;
-        return time != 0 && key.getCreationTimeSeconds() < time;
+        Instant keyRotationTime = vKeyRotationTime;
+        return keyRotationTime != null && key.getCreationTime().orElse(Instant.EPOCH).isBefore(keyRotationTime);
     }
 
     /**
@@ -5316,9 +5490,9 @@ public class Wallet extends BaseTaggableObject
      * @return A list of transactions that the wallet just made/will make for internal maintenance. Might be empty.
      * @throws org.bitcoinj.wallet.DeterministicUpgradeRequiresPassword if key rotation requires the users password.
      */
-    public ListenableCompletableFuture<List<Transaction>> doMaintenance(@Nullable KeyParameter aesKey, boolean signAndSend)
+    public CompletableFuture<List<Transaction>> doMaintenance(@Nullable AesKey aesKey, boolean signAndSend)
             throws DeterministicUpgradeRequiresPassword {
-        return doMaintenance(KeyChainGroupStructure.DEFAULT, aesKey, signAndSend);
+        return doMaintenance(KeyChainGroupStructure.BIP32, aesKey, signAndSend);
     }
 
     /**
@@ -5336,25 +5510,27 @@ public class Wallet extends BaseTaggableObject
      * @return A list of transactions that the wallet just made/will make for internal maintenance. Might be empty.
      * @throws org.bitcoinj.wallet.DeterministicUpgradeRequiresPassword if key rotation requires the users password.
      */
-    public ListenableCompletableFuture<List<Transaction>> doMaintenance(KeyChainGroupStructure structure,
-            @Nullable KeyParameter aesKey, boolean signAndSend) throws DeterministicUpgradeRequiresPassword {
+    public CompletableFuture<List<Transaction>> doMaintenance(KeyChainGroupStructure structure,
+            @Nullable AesKey aesKey, boolean signAndSend) throws DeterministicUpgradeRequiresPassword {
         List<Transaction> txns;
         lock.lock();
         keyChainGroupLock.lock();
         try {
             txns = maybeRotateKeys(structure, aesKey, signAndSend);
             if (!signAndSend)
-                return ListenableCompletableFuture.completedFuture(txns);
+                return CompletableFuture.completedFuture(txns);
         } finally {
             keyChainGroupLock.unlock();
             lock.unlock();
         }
         checkState(!lock.isHeldByCurrentThread());
-        ArrayList<CompletableFuture<Transaction>> futures = new ArrayList<>(txns.size());
+        List<CompletableFuture<Transaction>> futures = new ArrayList<>(txns.size());
         TransactionBroadcaster broadcaster = vTransactionBroadcaster;
         for (Transaction tx : txns) {
             try {
-                final CompletableFuture<Transaction> future = broadcaster.broadcastTransaction(tx).future();
+                final CompletableFuture<Transaction> future = broadcaster.broadcastTransaction(tx)
+                        .awaitRelayed()
+                        .thenApply(TransactionBroadcast::transaction);
                 futures.add(future);
                 future.whenComplete((transaction, throwable) -> {
                     if (transaction != null) {
@@ -5372,21 +5548,21 @@ public class Wallet extends BaseTaggableObject
 
     // Checks to see if any coins are controlled by rotating keys and if so, spends them.
     @GuardedBy("keyChainGroupLock")
-    private List<Transaction> maybeRotateKeys(KeyChainGroupStructure structure, @Nullable KeyParameter aesKey,
+    private List<Transaction> maybeRotateKeys(KeyChainGroupStructure structure, @Nullable AesKey aesKey,
             boolean sign) throws DeterministicUpgradeRequiresPassword {
         checkState(lock.isHeldByCurrentThread());
         checkState(keyChainGroupLock.isHeldByCurrentThread());
         List<Transaction> results = new LinkedList<>();
         // TODO: Handle chain replays here.
-        final long keyRotationTimestamp = vKeyRotationTimestamp;
-        if (keyRotationTimestamp == 0) return results;  // Nothing to do.
+        Instant keyRotationTime = vKeyRotationTime;
+        if (keyRotationTime == null) return results;  // Nothing to do.
 
         // We might have to create a new HD hierarchy if the previous ones are now rotating.
         boolean allChainsRotating = true;
-        Script.ScriptType preferredScriptType = Script.ScriptType.P2PKH;
-        if (keyChainGroup.isSupportsDeterministicChains()) {
+        ScriptType preferredScriptType = ScriptType.P2PKH;
+        if (keyChainGroup.supportsDeterministicChains()) {
             for (DeterministicKeyChain chain : keyChainGroup.getDeterministicKeyChains()) {
-                if (chain.getEarliestKeyCreationTime() >= keyRotationTimestamp)
+                if (chain.earliestKeyCreationTime().compareTo(keyRotationTime) >= 0)
                     allChainsRotating = false;
                 else
                     preferredScriptType = chain.getOutputScriptType();
@@ -5398,40 +5574,40 @@ public class Wallet extends BaseTaggableObject
                     log.info(
                             "All deterministic chains are currently rotating and we have no random keys, creating fresh {} chain: backup required after this.",
                             preferredScriptType);
-                    KeyChainGroup newChains = KeyChainGroup.builder(params, structure).fromRandom(preferredScriptType)
+                    KeyChainGroup newChains = KeyChainGroup.builder(network, structure).fromRandom(preferredScriptType)
                             .build();
                     if (keyChainGroup.isEncrypted()) {
                         if (aesKey == null)
                             throw new DeterministicUpgradeRequiresPassword();
                         KeyCrypter keyCrypter = keyChainGroup.getKeyCrypter();
                         keyChainGroup.decrypt(aesKey);
-                        keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTimestamp);
+                        keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTime);
                         keyChainGroup.encrypt(keyCrypter, aesKey);
                     } else {
-                        keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTimestamp);
+                        keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTime);
                     }
                 } else {
                     log.info(
                             "All deterministic chains are currently rotating, creating a new {} one from the next oldest non-rotating key material...",
                             preferredScriptType);
-                    keyChainGroup.upgradeToDeterministic(preferredScriptType, structure, keyRotationTimestamp, aesKey);
+                    keyChainGroup.upgradeToDeterministic(preferredScriptType, structure, keyRotationTime, aesKey);
                     log.info("...upgraded to HD again, based on next best oldest key.");
                 }
             } catch (AllRandomKeysRotating rotating) {
                 log.info(
                         "No non-rotating random keys available, generating entirely new {} tree: backup required after this.",
                         preferredScriptType);
-                KeyChainGroup newChains = KeyChainGroup.builder(params, structure).fromRandom(preferredScriptType)
+                KeyChainGroup newChains = KeyChainGroup.builder(network, structure).fromRandom(preferredScriptType)
                         .build();
                 if (keyChainGroup.isEncrypted()) {
                     if (aesKey == null)
                         throw new DeterministicUpgradeRequiresPassword();
                     KeyCrypter keyCrypter = keyChainGroup.getKeyCrypter();
                     keyChainGroup.decrypt(aesKey);
-                    keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTimestamp);
+                    keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTime);
                     keyChainGroup.encrypt(keyCrypter, aesKey);
                 } else {
-                    keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTimestamp);
+                    keyChainGroup.mergeActiveKeyChains(newChains, keyRotationTime);
                 }
             }
             saveNow();
@@ -5442,14 +5618,14 @@ public class Wallet extends BaseTaggableObject
         // fully done, at least for now (we may still get more transactions later and this method will be reinvoked).
         Transaction tx;
         do {
-            tx = rekeyOneBatch(keyRotationTimestamp, aesKey, results, sign);
+            tx = rekeyOneBatch(keyRotationTime, aesKey, results, sign);
             if (tx != null) results.add(tx);
         } while (tx != null && tx.getInputs().size() == KeyTimeCoinSelector.MAX_SIMULTANEOUS_INPUTS);
         return results;
     }
 
     @Nullable
-    private Transaction rekeyOneBatch(long timeSecs, @Nullable KeyParameter aesKey, List<Transaction> others, boolean sign) {
+    private Transaction rekeyOneBatch(Instant time, @Nullable AesKey aesKey, List<Transaction> others, boolean sign) {
         lock.lock();
         try {
             // Build the transaction using some custom logic for our special needs. Last parameter to
@@ -5460,31 +5636,33 @@ public class Wallet extends BaseTaggableObject
             // have already got stuck double spends in their wallet due to the Bloom-filtering block reordering
             // bug that was fixed in 0.10, thus, making a re-key transaction depend on those would cause it to
             // never confirm at all.
-            CoinSelector keyTimeSelector = new KeyTimeCoinSelector(this, timeSecs, true);
-            FilteringCoinSelector selector = new FilteringCoinSelector(keyTimeSelector);
-            for (Transaction other : others)
-                selector.excludeOutputsSpentBy(other);
+            List<TransactionOutPoint> excluded = others.stream()
+                    .flatMap(tx -> tx.getInputs().stream())
+                    .map(TransactionInput::getOutpoint)
+                    .collect(StreamUtils.toUnmodifiableList());
+            CoinSelector keyTimeSelector = new KeyTimeCoinSelector(this, time, true);
+            FilteringCoinSelector selector = new FilteringCoinSelector(keyTimeSelector, excluded);
             // TODO: Make this use the standard SendRequest.
             CoinSelection toMove = selector.select(Coin.ZERO, calculateAllSpendCandidates());
-            if (toMove.valueGathered.equals(Coin.ZERO)) return null;  // Nothing to do.
-            Transaction rekeyTx = new Transaction(params);
-            for (TransactionOutput output : toMove.gathered) {
+            if (toMove.totalValue().equals(Coin.ZERO)) return null;  // Nothing to do.
+            Transaction rekeyTx = new Transaction();
+            for (TransactionOutput output : toMove.outputs()) {
                 rekeyTx.addInput(output);
             }
             // When not signing, don't waste addresses.
-            rekeyTx.addOutput(toMove.valueGathered, sign ? freshReceiveAddress() : currentReceiveAddress());
-            if (!adjustOutputDownwardsForFee(rekeyTx, toMove, Transaction.DEFAULT_TX_FEE, true)) {
+            rekeyTx.addOutput(toMove.totalValue(), sign ? freshReceiveAddress() : currentReceiveAddress());
+            if (!adjustOutputDownwardsForFee(rekeyTx, toMove, Transaction.DEFAULT_TX_FEE_RATE, true)) {
                 log.error("Failed to adjust rekey tx for fees.");
                 return null;
             }
-            rekeyTx.getConfidence().setSource(TransactionConfidence.Source.SELF);
+            getConfidence(rekeyTx).setSource(TransactionConfidence.Source.SELF);
             rekeyTx.setPurpose(Transaction.Purpose.KEY_ROTATION);
             SendRequest req = SendRequest.forTx(rekeyTx);
             req.aesKey = aesKey;
             if (sign)
                 signTransaction(req);
             // KeyTimeCoinSelector should never select enough inputs to push us oversize.
-            checkState(rekeyTx.unsafeBitcoinSerialize().length < Transaction.MAX_STANDARD_TX_SIZE);
+            checkState(rekeyTx.messageSize() < Transaction.MAX_STANDARD_TX_SIZE);
             return rekeyTx;
         } catch (VerificationException e) {
             throw new RuntimeException(e);  // Cannot happen.

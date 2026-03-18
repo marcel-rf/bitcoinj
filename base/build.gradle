@@ -1,0 +1,102 @@
+import org.gradle.util.GradleVersion
+
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+version = '0.18-SNAPSHOT'
+
+dependencies {
+    api 'org.jspecify:jspecify:1.0.0'
+
+    testImplementation project(':bitcoinj-test-support')
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.easymock:easymock:5.6.0'
+    testImplementation 'org.slf4j:slf4j-jdk14:2.0.16'
+    testImplementation 'nl.jqno.equalsverifier:equalsverifier:3.18.1'
+    testImplementation 'org.hamcrest:hamcrest-library:3.0'
+    testImplementation 'pl.pragmatists:JUnitParams:1.1.1'
+}
+
+tasks.withType(JavaCompile) {
+    options.compilerArgs.addAll(['--release', '8'])
+    options.compilerArgs << '-Xlint:deprecation'
+    options.encoding = 'UTF-8'
+}
+
+javadoc.options.encoding = 'UTF-8'
+// Uncomment the following line to see all the JavaDoc warnings
+//javadoc.options.addStringOption('Xmaxwarns', '10000')
+
+// Test with default Java toolchain
+test {
+    doFirst {
+        logger.lifecycle("Testing with default toolchain")
+    }
+}
+
+def gradleVersionToolchains = GradleVersion.version("6.7")
+// Activate if `testMinJdk` is a integer > 0 in `gradle.properties` or set with `-P` on the command-line
+def minJdkVersion = Integer.valueOf((String) findProperty('testMinJdk') ?: "0")
+
+if (minJdkVersion > 0 && GradleVersion.current() > gradleVersionToolchains) {
+    // If the Gradle Java Toolchains feature is available, run tests on older JDKs
+    System.err.println "Adding 'testOnMinJdk' task for version=${minJdkVersion}, because ${GradleVersion.current()}"
+
+    task('testOnMinJdk', type: Test) {
+        doFirst {
+            logger.lifecycle("Testing with JDK ${javaLauncher.get().metadata.javaRuntimeVersion}")
+        }
+        javaLauncher = javaToolchains.launcherFor {
+            languageVersion = JavaLanguageVersion.of(minJdkVersion)
+        }
+    }
+    check.dependsOn testOnMinJdk
+}
+
+jar {
+    manifest {
+        attributes 'Automatic-Module-Name': 'org.bitcoinj.base'
+    }
+}
+
+def minGradleArchiveClassifierVersion = GradleVersion.version("5.0")
+
+task javadocJar(type: Jar, dependsOn: javadoc) {
+    if (GradleVersion.current() > minGradleArchiveClassifierVersion) {
+        archiveClassifier.set('javadoc')
+    } else {
+        classifier = 'javadoc'
+    }
+    from javadoc.destinationDir
+}
+
+task sourcesJar(type: Jar, dependsOn: classes) {
+    if (GradleVersion.current() > minGradleArchiveClassifierVersion) {
+        archiveClassifier.set('sources')
+    } else {
+        classifier = 'sources'
+    }
+    from sourceSets.main.allSource
+}
+
+artifacts {
+    archives sourcesJar
+    archives javadocJar
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            artifactId = 'bitcoinj-base'
+            from components.java
+            artifact sourcesJar
+            artifact javadocJar
+
+            pom {
+                description = 'A Java Bitcoin library'
+            }
+        }
+    }
+}

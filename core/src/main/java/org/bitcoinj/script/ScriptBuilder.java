@@ -18,27 +18,40 @@
 
 package org.bitcoinj.script;
 
-import org.bitcoinj.core.Address;
-import org.bitcoinj.core.LegacyAddress;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.SegwitAddress;
-import org.bitcoinj.core.Sha256Hash;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.internal.TimeUtils;
+import org.bitcoinj.crypto.ECKey;
+import org.bitcoinj.base.LegacyAddress;
+import org.bitcoinj.base.SegwitAddress;
+import org.bitcoinj.base.Sha256Hash;
 import org.bitcoinj.core.Transaction;
-import org.bitcoinj.core.Utils;
 import org.bitcoinj.crypto.TransactionSignature;
-import org.bitcoinj.script.Script.ScriptType;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.crypto.internal.CryptoUtils;
 
-import javax.annotation.Nullable;
+import org.jspecify.annotations.Nullable;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Stack;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
-import static org.bitcoinj.script.ScriptOpCodes.*;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
+import static org.bitcoinj.script.ScriptOpCodes.OP_0;
+import static org.bitcoinj.script.ScriptOpCodes.OP_1NEGATE;
+import static org.bitcoinj.script.ScriptOpCodes.OP_CHECKMULTISIG;
+import static org.bitcoinj.script.ScriptOpCodes.OP_CHECKSIG;
+import static org.bitcoinj.script.ScriptOpCodes.OP_DUP;
+import static org.bitcoinj.script.ScriptOpCodes.OP_EQUAL;
+import static org.bitcoinj.script.ScriptOpCodes.OP_EQUALVERIFY;
+import static org.bitcoinj.script.ScriptOpCodes.OP_HASH160;
+import static org.bitcoinj.script.ScriptOpCodes.OP_PUSHDATA1;
+import static org.bitcoinj.script.ScriptOpCodes.OP_PUSHDATA2;
+import static org.bitcoinj.script.ScriptOpCodes.OP_PUSHDATA4;
+import static org.bitcoinj.script.ScriptOpCodes.OP_RETURN;
 
 /**
  * <p>Tools for the construction of commonly used script types. You don't normally need this as it's hidden behind
@@ -47,49 +60,50 @@ import static org.bitcoinj.script.ScriptOpCodes.*;
  */
 public class ScriptBuilder {
     private final List<ScriptChunk> chunks;
+    /**
+     * If this is set, the script to be built is associated with a creation time. This is currently used in the
+     * context of watching wallets only, where the scriptPubKeys being watched actually represent public keys and
+     * their addresses.
+     */
+    @Nullable
+    private Instant creationTime = null;
 
     /** Creates a fresh ScriptBuilder with an empty program. */
     public ScriptBuilder() {
-        chunks = new LinkedList<>();
+        chunks = new ArrayList<>(5);
     }
 
     /** Creates a fresh ScriptBuilder with the given program as the starting point. */
     public ScriptBuilder(Script template) {
-        chunks = new ArrayList<>(template.getChunks());
+        chunks = new ArrayList<>(template.chunks());
+    }
+
+    /**
+     * Associates this script to be built with a given creation time. This is currently used in the context of
+     * watching wallets only, where the scriptPubKeys being watched actually represent public keys and their addresses.
+     *
+     * @param creationTime creation time to associate the script with
+     * @return this builder
+     */
+    public ScriptBuilder creationTime(Instant creationTime) {
+        this.creationTime = Objects.requireNonNull(creationTime);
+        return this;
     }
 
     /** Adds the given chunk to the end of the program */
     public ScriptBuilder addChunk(ScriptChunk chunk) {
-        return addChunk(chunks.size(), chunk);
-    }
-
-    /** Adds the given chunk at the given index in the program */
-    public ScriptBuilder addChunk(int index, ScriptChunk chunk) {
-        chunks.add(index, chunk);
+        chunks.add(chunk);
         return this;
     }
 
     /** Adds the given opcode to the end of the program. */
     public ScriptBuilder op(int opcode) {
-        return op(chunks.size(), opcode);
-    }
-
-    /** Adds the given opcode to the given index in the program */
-    public ScriptBuilder op(int index, int opcode) {
         checkArgument(opcode > OP_PUSHDATA4);
-        return addChunk(index, new ScriptChunk(opcode, null));
+        return addChunk(new ScriptChunk(opcode, null));
     }
 
     /** Adds a copy of the given byte array as a data element (i.e. PUSHDATA) at the end of the program. */
     public ScriptBuilder data(byte[] data) {
-        if (data.length == 0)
-            return smallNum(0);
-        else
-            return data(chunks.size(), data);
-    }
-
-    /** Adds a copy of the given byte array as a data element (i.e. PUSHDATA) at the given index in the program. */
-    public ScriptBuilder data(int index, byte[] data) {
         // implements BIP62
         byte[] copy = Arrays.copyOf(data, data.length);
         int opcode;
@@ -110,7 +124,7 @@ public class ScriptBuilder {
         } else {
             throw new RuntimeException("Unimplemented");
         }
-        return addChunk(index, new ScriptChunk(opcode, copy));
+        return addChunk(new ScriptChunk(opcode, copy));
     }
 
     /**
@@ -118,20 +132,12 @@ public class ScriptBuilder {
      * shortest encoding possible.
      */
     public ScriptBuilder number(long num) {
-        return number(chunks.size(), num);
-    }
-
-    /**
-     * Adds the given number to the given index in the program. Automatically
-     * uses shortest encoding possible.
-     */
-    public ScriptBuilder number(int index, long num) {
         if (num == -1) {
-            return op(index, OP_1NEGATE);
+            return op(OP_1NEGATE);
         } else if (num >= 0 && num <= 16) {
-            return smallNum(index, (int) num);
+            return smallNum((int) num);
         } else {
-            return bigNum(index, num);
+            return bigNum(num);
         }
     }
 
@@ -142,7 +148,11 @@ public class ScriptBuilder {
      * @see #number(long)
      */
     public ScriptBuilder smallNum(int num) {
-        return smallNum(chunks.size(), num);
+        checkArgument(num >= 0, () ->
+                "cannot encode negative numbers with smallNum");
+        checkArgument(num <= 16, () ->
+                "cannot encode numbers larger than 16 with smallNum");
+        return addChunk(new ScriptChunk(Script.encodeToOpN(num), null));
     }
 
     /** Adds the given number as a push data chunk.
@@ -152,31 +162,7 @@ public class ScriptBuilder {
      * 
      * @see #number(long)
      */
-    protected ScriptBuilder bigNum(long num) {
-        return bigNum(chunks.size(), num);
-    }
-
-    /**
-     * Adds the given number as a OP_N opcode to the given index in the program.
-     * Only handles values 0-16 inclusive.
-     * 
-     * @see #number(long)
-     */
-    public ScriptBuilder smallNum(int index, int num) {
-        checkArgument(num >= 0, "Cannot encode negative numbers with smallNum");
-        checkArgument(num <= 16, "Cannot encode numbers larger than 16 with smallNum");
-        return addChunk(index, new ScriptChunk(Script.encodeToOpN(num), null));
-    }
-
-    /**
-     * Adds the given number as a push data chunk to the given index in the program.
-     * This is intended to use for negative numbers or values greater than 16, and although
-     * it will accept numbers in the range 0-16 inclusive, the encoding would be
-     * considered non-standard.
-     * 
-     * @see #number(long)
-     */
-    protected ScriptBuilder bigNum(int index, long num) {
+    public ScriptBuilder bigNum(long num) {
         final byte[] data;
 
         if (num == 0) {
@@ -210,7 +196,7 @@ public class ScriptBuilder {
 
         // At most the encoded value could take up to 8 bytes, so we don't need
         // to use OP_PUSHDATA opcodes
-        return addChunk(index, new ScriptChunk(data.length, data));
+        return addChunk(new ScriptChunk(data.length, data));
     }
 
     /**
@@ -222,15 +208,6 @@ public class ScriptBuilder {
     }
 
     /**
-     * Adds true to the given index in the program.
-     * @param index at which insert true
-     * @return this
-     */
-    public ScriptBuilder opTrue(int index) {
-        return number(index, 1); // push OP_1/OP_TRUE
-    }
-
-    /**
      * Adds false to the end of the program.
      * @return this
      */
@@ -238,18 +215,12 @@ public class ScriptBuilder {
         return number(0); // push OP_0/OP_FALSE
     }
 
-    /**
-     * Adds false to the given index in the program.
-     * @param index at which insert true
-     * @return this
-     */
-    public ScriptBuilder opFalse(int index) {
-        return number(index, 0); // push OP_0/OP_FALSE
-    }
-
     /** Creates a new immutable Script based on the state of the builder. */
     public Script build() {
-        return new Script(chunks);
+        if (creationTime != null)
+            return Script.of(chunks, creationTime);
+        else
+            return Script.of(chunks);
     }
 
     /** Creates an empty script. */
@@ -257,26 +228,50 @@ public class ScriptBuilder {
         return new ScriptBuilder().build();
     }
 
-    /** Creates a scriptPubKey that encodes payment to the given address. */
+    /**
+     * Creates a scriptPubKey that locks an output to the given address.
+     *
+     * @param to           address to lock an output to
+     * @param creationTime creation time of the scriptPubKey
+     * @return scriptPubKey that locks an output
+     */
+    public static Script createOutputScript(Address to, Instant creationTime) {
+        return new ScriptBuilder().outputScript(to).creationTime(creationTime).build();
+    }
+
+    /**
+     * Creates a scriptPubKey that locks an output to the given address.
+     *
+     * @param to address to lock an output to
+     * @return scriptPubKey that locks an output
+     */
     public static Script createOutputScript(Address to) {
+        return new ScriptBuilder().outputScript(to).build();
+    }
+
+    private ScriptBuilder outputScript(Address to) {
+        checkState(chunks.isEmpty());
         if (to instanceof LegacyAddress) {
             ScriptType scriptType = to.getOutputScriptType();
             if (scriptType == ScriptType.P2PKH)
-                return createP2PKHOutputScript(to.getHash());
+                p2pkhOutputScript(((LegacyAddress) to).getHash());
             else if (scriptType == ScriptType.P2SH)
-                return createP2SHOutputScript(to.getHash());
+                p2shOutputScript(((LegacyAddress) to).getHash());
             else
                 throw new IllegalStateException("Cannot handle " + scriptType);
         } else if (to instanceof SegwitAddress) {
-            ScriptBuilder builder = new ScriptBuilder();
-            // OP_0 <pubKeyHash|scriptHash>
-            SegwitAddress toSegwit = (SegwitAddress) to;
-            builder.smallNum(toSegwit.getWitnessVersion());
-            builder.data(toSegwit.getWitnessProgram());
-            return builder.build();
+            p2whOutputScript((SegwitAddress) to);
         } else {
             throw new IllegalStateException("Cannot handle " + to);
         }
+        return this;
+    }
+
+    private ScriptBuilder p2whOutputScript(SegwitAddress address) {
+        checkState(chunks.isEmpty());
+        // OP_0 <pubKeyHash|scriptHash>
+        return smallNum(address.getWitnessVersion())
+                .data(address.getWitnessProgram());
     }
 
     /**
@@ -350,14 +345,14 @@ public class ScriptBuilder {
                 sigs.add(signature.encodeToBitcoin());
             }
         }
-        return createMultiSigInputScriptBytes(sigs, multisigProgram.getProgram());
+        return createMultiSigInputScriptBytes(sigs, multisigProgram.program());
     }
 
     /**
      * Create a program that satisfies an OP_CHECKMULTISIG program, using pre-encoded signatures. 
      * Optionally, appends the script program bytes if spending a P2SH output.
      */
-    public static Script createMultiSigInputScriptBytes(List<byte[]> signatures, @Nullable byte[] multisigProgramBytes) {
+    public static Script createMultiSigInputScriptBytes(List<byte[]> signatures, byte @Nullable [] multisigProgramBytes) {
         checkArgument(signatures.size() <= 16);
         ScriptBuilder builder = new ScriptBuilder();
         builder.smallNum(0);  // Work around a bug in CHECKMULTISIG that is now a required part of the protocol.
@@ -381,14 +376,15 @@ public class ScriptBuilder {
     public static Script updateScriptWithSignature(Script scriptSig, byte[] signature, int targetIndex,
                                                    int sigsPrefixCount, int sigsSuffixCount) {
         ScriptBuilder builder = new ScriptBuilder();
-        List<ScriptChunk> inputChunks = scriptSig.getChunks();
+        List<ScriptChunk> inputChunks = scriptSig.chunks();
         int totalChunks = inputChunks.size();
 
         // Check if we have a place to insert, otherwise just return given scriptSig unchanged.
         // We assume here that OP_0 placeholders always go after the sigs, so
         // to find if we have sigs missing, we can just check the chunk in latest sig position
         boolean hasMissingSigs = inputChunks.get(totalChunks - sigsSuffixCount - 1).equalsOpCode(OP_0);
-        checkArgument(hasMissingSigs, "ScriptSig is already filled with signatures");
+        checkArgument(hasMissingSigs, () ->
+                "scriptSig is already filled with signatures");
 
         // copy the prefix
         for (ScriptChunk chunk: inputChunks.subList(0, sigsPrefixCount))
@@ -429,91 +425,134 @@ public class ScriptBuilder {
         return builder.build();
     }
 
-    /** Creates a scriptPubKey that encodes payment to the given raw public key. */
+    /**
+     * Creates a scriptPubKey that locks an output to the given raw public key. The pubkey can be arbitrary data and
+     * may be invalid.
+     * <p>
+     * This is a special purpose method. For normal P2PK use, it is recommended to construct a pubkey with
+     * {@link ECKey#fromPublicOnly(byte[])} and use that on {@link #createP2PKOutputScript(ECKey)}.
+     *
+     * @param pubKey arbitrary pubkey bytes to lock an output to
+     * @return P2PK scriptPubKey that locks an output
+     */
     public static Script createP2PKOutputScript(byte[] pubKey) {
         return new ScriptBuilder().data(pubKey).op(OP_CHECKSIG).build();
     }
 
-    /** Creates a scriptPubKey that encodes payment to the given raw public key. */
+    /**
+     * Creates a scriptPubKey that locks an output to the given public key.
+     *
+     * @param pubKey pubkey to lock an output to
+     * @return P2PK scriptPubKey that locks an output
+     */
     public static Script createP2PKOutputScript(ECKey pubKey) {
         return createP2PKOutputScript(pubKey.getPubKey());
     }
 
     /**
-     * Creates a scriptPubKey that sends to the given public key hash.
+     * Creates a scriptPubKey that locks an output to the given public key hash.
+     *
+     * @param pubKeyHash 20 hash bytes of the pubkey to lock an output to
+     * @return P2PKH scriptPubKey that locks an output
      */
-    public static Script createP2PKHOutputScript(byte[] hash) {
+    public static Script createP2PKHOutputScript(byte[] pubKeyHash) {
+        return new ScriptBuilder().p2pkhOutputScript(pubKeyHash).build();
+    }
+
+    private ScriptBuilder p2pkhOutputScript(byte[] hash) {
         checkArgument(hash.length == LegacyAddress.LENGTH);
-        ScriptBuilder builder = new ScriptBuilder();
-        builder.op(OP_DUP);
-        builder.op(OP_HASH160);
-        builder.data(hash);
-        builder.op(OP_EQUALVERIFY);
-        builder.op(OP_CHECKSIG);
-        return builder.build();
+        checkState(chunks.isEmpty());
+        return op(OP_DUP)
+                .op(OP_HASH160)
+                .data(hash)
+                .op(OP_EQUALVERIFY)
+                .op(OP_CHECKSIG);
     }
 
     /**
-     * Creates a scriptPubKey that sends to the given public key.
+     * Creates a scriptPubKey that locks an output to a hash of a given public key.
+     *
+     * @param pubKey pubkey whose hash to lock an output to
+     * @return P2PKH scriptPubKey that locks an output
      */
-    public static Script createP2PKHOutputScript(ECKey key) {
-        checkArgument(key.isCompressed());
-        return createP2PKHOutputScript(key.getPubKeyHash());
+    public static Script createP2PKHOutputScript(ECKey pubKey) {
+        checkArgument(pubKey.isCompressed());
+        return createP2PKHOutputScript(pubKey.getPubKeyHash());
     }
 
     /**
-     * Creates a segwit scriptPubKey that sends to the given public key hash.
+     * Creates a segwit scriptPubKey that locks an output to the given public key hash.
+     *
+     * @param pubKeyHash 20 hash bytes of the pubkey to lock an output to
+     * @return P2WPKH scriptPubKey that locks an output
      */
-    public static Script createP2WPKHOutputScript(byte[] hash) {
-        checkArgument(hash.length == SegwitAddress.WITNESS_PROGRAM_LENGTH_PKH);
-        return new ScriptBuilder().smallNum(0).data(hash).build();
+    public static Script createP2WPKHOutputScript(byte[] pubKeyHash) {
+        checkArgument(pubKeyHash.length == SegwitAddress.WITNESS_PROGRAM_LENGTH_PKH);
+        return new ScriptBuilder().smallNum(0).data(pubKeyHash).build();
     }
 
     /**
-     * Creates a segwit scriptPubKey that sends to the given public key.
+     * Creates a segwit scriptPubKey that locks an output to the hash of a given public key. In accordance with the
+     * segwit specification, the public key must be compressed.
+     *
+     * @param pubKey pubkey whose hash to lock an output to
+     * @return P2WPKH scriptPubKey that locks an output
      */
-    public static Script createP2WPKHOutputScript(ECKey key) {
-        checkArgument(key.isCompressed());
-        return createP2WPKHOutputScript(key.getPubKeyHash());
+    public static Script createP2WPKHOutputScript(ECKey pubKey) {
+        checkArgument(pubKey.isCompressed());
+        return createP2WPKHOutputScript(pubKey.getPubKeyHash());
     }
 
     /**
-     * Creates a scriptPubKey that sends to the given script hash. Read
+     * Creates a scriptPubKey that locks an output to the given script hash. Read
      * <a href="https://github.com/bitcoin/bips/blob/master/bip-0016.mediawiki">BIP 16</a> to learn more about this
      * kind of script.
      *
-     * @param hash The hash of the redeem script
-     * @return an output script that sends to the redeem script
+     * @param redeemScriptHash 20 hash bytes of the redeem script to lock an output to
+     * @return P2SH scriptPubKey that locks an output
      */
-    public static Script createP2SHOutputScript(byte[] hash) {
+    public static Script createP2SHOutputScript(byte[] redeemScriptHash) {
+        return new ScriptBuilder().p2shOutputScript(redeemScriptHash).build();
+    }
+
+    private ScriptBuilder p2shOutputScript(byte[] hash) {
         checkArgument(hash.length == 20);
-        return new ScriptBuilder().op(OP_HASH160).data(hash).op(OP_EQUAL).build();
+        checkState(chunks.isEmpty());
+        return op(OP_HASH160)
+                .data(hash)
+                .op(OP_EQUAL);
     }
 
     /**
-     * Creates a scriptPubKey for a given redeem script.
+     * Creates a scriptPubKey that locks an output to a hash of the given redeem script.
      *
-     * @param redeemScript The redeem script
-     * @return an output script that sends to the redeem script
+     * @param redeemScript redeem script whose hash to lock an output to
+     * @return P2SH scriptPubKey that locks an output
      */
     public static Script createP2SHOutputScript(Script redeemScript) {
-        byte[] hash = Utils.sha256hash160(redeemScript.getProgram());
+        byte[] hash = CryptoUtils.sha256hash160(redeemScript.program());
         return ScriptBuilder.createP2SHOutputScript(hash);
     }
 
     /**
-     * Creates a segwit scriptPubKey that sends to the given script hash.
+     * Creates a segwit scriptPubKey that locks an output to the given script hash.
+     *
+     * @param redeemScriptHash 32 hash bytes of the redeem script to lock an output to
+     * @return P2WSH scriptPubKey that locks an output
      */
-    public static Script createP2WSHOutputScript(byte[] hash) {
-        checkArgument(hash.length == SegwitAddress.WITNESS_PROGRAM_LENGTH_SH);
-        return new ScriptBuilder().smallNum(0).data(hash).build();
+    public static Script createP2WSHOutputScript(byte[] redeemScriptHash) {
+        checkArgument(redeemScriptHash.length == SegwitAddress.WITNESS_PROGRAM_LENGTH_SH);
+        return new ScriptBuilder().smallNum(0).data(redeemScriptHash).build();
     }
 
     /**
-     * Creates a segwit scriptPubKey for the given redeem script.
+     * Creates a segwit scriptPubKey that locks an output to a hash of the given redeem script.
+     *
+     * @param redeemScript redeem script whose hash to lock an output to
+     * @return P2WSH scriptPubKey that locks an output
      */
     public static Script createP2WSHOutputScript(Script redeemScript) {
-        byte[] hash = Sha256Hash.hash(redeemScript.getProgram());
+        byte[] hash = Sha256Hash.hash(redeemScript.program());
         return ScriptBuilder.createP2WSHOutputScript(hash);
     }
 
@@ -522,8 +561,8 @@ public class ScriptBuilder {
      * be placed in redeem script in the lexicographical sorting order.
      *
      * @param threshold The threshold number of keys that must sign (n)
-     * @param pubkeys A list of m public keys
-     * @return The P2SH multisig output script
+     * @param pubkeys list of m public keys to lock an output to
+     * @return P2SH multisig scriptPubKey that locks an output
      */
     public static Script createP2SHOutputScript(int threshold, List<ECKey> pubkeys) {
         Script redeemScript = createRedeemScript(threshold, pubkeys);
@@ -535,8 +574,8 @@ public class ScriptBuilder {
      * redeem script in the lexicographical sorting order.
      *
      * @param threshold The threshold number of keys that must sign (n)
-     * @param pubkeys A list of m public keys
-     * @return The P2SH multisig redeem script
+     * @param pubkeys list of m public keys to lock an output to
+     * @return P2SH multisig scriptPubKey that locks an output
      */
     public static Script createRedeemScript(int threshold, List<ECKey> pubkeys) {
         pubkeys = new ArrayList<>(pubkeys);

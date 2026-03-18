@@ -17,29 +17,29 @@
 
 package org.bitcoinj.core.listeners;
 
+import org.bitcoinj.base.internal.TimeUtils;
 import org.bitcoinj.core.Block;
 import org.bitcoinj.core.FilteredBlock;
 import org.bitcoinj.core.Peer;
-import org.bitcoinj.core.Utils;
-import org.bitcoinj.utils.ListenableCompletableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.*;
-import java.util.Date;
+import org.jspecify.annotations.Nullable;
+import java.time.Instant;
 import java.util.Locale;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
 /**
- * <p>An implementation of {@link AbstractPeerDataEventListener} that listens to chain download events and tracks progress
+ * <p>An implementation of {@link BlockchainDownloadEventListener} that listens to chain download events and tracks progress
  * as a percentage. The default implementation prints progress to stdout, but you can subclass it and override the
  * progress method to update a GUI instead.</p>
  */
-public class DownloadProgressTracker extends AbstractPeerDataEventListener {
+public class DownloadProgressTracker implements BlockchainDownloadEventListener {
     private static final Logger log = LoggerFactory.getLogger(DownloadProgressTracker.class);
     private int originalBlocksLeft = -1;
     private int lastPercent = 0;
-    private final ListenableCompletableFuture<Long> future = new ListenableCompletableFuture<>();
+    private final CompletableFuture<Long> future = new CompletableFuture<>();
     private boolean caughtUp = false;
 
     @Override
@@ -67,7 +67,7 @@ public class DownloadProgressTracker extends AbstractPeerDataEventListener {
             caughtUp = true;
             if (lastPercent != 100) {
                 lastPercent = 100;
-                progress(lastPercent, blocksLeft, new Date(block.getTimeSeconds() * 1000));
+                progress(lastPercent, blocksLeft, block.time());
             }
             doneDownload();
             future.complete(peer.getBestHeight());
@@ -79,7 +79,7 @@ public class DownloadProgressTracker extends AbstractPeerDataEventListener {
 
         double pct = 100.0 - (100.0 * (blocksLeft / (double) originalBlocksLeft));
         if ((int) pct != lastPercent) {
-            progress(pct, blocksLeft, new Date(block.getTimeSeconds() * 1000));
+            progress(pct, blocksLeft, block.time());
             lastPercent = (int) pct;
         }
     }
@@ -88,11 +88,11 @@ public class DownloadProgressTracker extends AbstractPeerDataEventListener {
      * Called when download progress is made.
      *
      * @param pct  the percentage of chain downloaded, estimated
-     * @param date the date of the last block downloaded
+     * @param time the time of the last block downloaded
      */
-    protected void progress(double pct, int blocksSoFar, Date date) {
+    protected void progress(double pct, int blocksSoFar, Instant time) {
         log.info(String.format(Locale.US, "Chain download %d%% done with %d blocks to go, block date %s", (int) pct, blocksSoFar,
-                Utils.dateTimeFormat(date)));
+                TimeUtils.dateTimeFormat(time)));
     }
 
     /**
@@ -126,7 +126,7 @@ public class DownloadProgressTracker extends AbstractPeerDataEventListener {
      * Returns a listenable future that completes with the height of the best chain (as reported by the peer) once chain
      * download seems to be finished.
      */
-    public ListenableCompletableFuture<Long> getFuture() {
+    public CompletableFuture<Long> getFuture() {
         return future;
     }
 }

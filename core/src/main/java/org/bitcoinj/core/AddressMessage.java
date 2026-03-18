@@ -16,37 +16,48 @@
 
 package org.bitcoinj.core;
 
-import java.io.IOException;
-import java.io.OutputStream;
+import org.bitcoinj.base.VarInt;
+import org.bitcoinj.net.discovery.PeerDiscovery;
+
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-public abstract class AddressMessage extends Message {
+import static org.bitcoinj.base.internal.Preconditions.check;
+
+/**
+ * Abstract superclass for address messages on the P2P network, which contain network addresses of other peers. This is
+ * one of the ways peers can find each other without using the {@link PeerDiscovery} mechanism.
+ */
+public abstract class AddressMessage implements Message {
 
     protected static final long MAX_ADDRESSES = 1000;
     protected List<PeerAddress> addresses;
 
-    AddressMessage(NetworkParameters params, byte[] payload, int offset, MessageSerializer serializer, int length) throws ProtocolException {
-        super(params, payload, offset, serializer, length);
+    protected static List<PeerAddress> readAddresses(ByteBuffer payload, int protocolVariant) throws BufferUnderflowException, ProtocolException {
+        VarInt numAddressesVarInt = VarInt.read(payload);
+        check(numAddressesVarInt.fitsInt(), BufferUnderflowException::new);
+        int numAddresses = numAddressesVarInt.intValue();
+        // Guard against ultra large messages that will crash us.
+        if (numAddresses > MAX_ADDRESSES)
+            throw new ProtocolException("Address message too large.");
+        List<PeerAddress> addresses = new ArrayList<>(numAddresses);
+        for (int i = 0; i < numAddresses; i++) {
+            addresses.add(PeerAddress.read(payload, protocolVariant));
+        }
+        return addresses;
     }
 
-    @Override
-    protected void bitcoinSerializeToStream(OutputStream stream) throws IOException {
-        if (addresses == null)
-            return;
-        stream.write(new VarInt(addresses.size()).encode());
-        for (PeerAddress addr : addresses) {
-            addr.bitcoinSerialize(stream);
-        }
+    protected AddressMessage(List<PeerAddress> addresses) {
+        this.addresses = addresses;
     }
 
     public abstract void addAddress(PeerAddress address);
 
     public void removeAddress(int index) {
-        unCache();
         PeerAddress address = addresses.remove(index);
-        address.setParent(null);
-        length = UNKNOWN_LENGTH;
     }
 
     /**

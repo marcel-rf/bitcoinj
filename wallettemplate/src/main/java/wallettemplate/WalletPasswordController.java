@@ -16,10 +16,8 @@
 
 package wallettemplate;
 
-import javafx.application.Platform;
-import org.bitcoinj.crypto.KeyCrypterScrypt;
-import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
+import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyObjectProperty;
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.event.ActionEvent;
@@ -30,18 +28,23 @@ import javafx.scene.control.ProgressIndicator;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
+import org.bitcoinj.crypto.AesKey;
+import org.bitcoinj.crypto.KeyCrypterScrypt;
 import org.bitcoinj.walletfx.application.WalletApplication;
 import org.bitcoinj.walletfx.overlay.OverlayController;
 import org.bitcoinj.walletfx.overlay.OverlayableStackPaneController;
+import org.bitcoinj.walletfx.utils.KeyDerivationTasks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.bouncycastle.crypto.params.KeyParameter;
-import org.bitcoinj.walletfx.utils.KeyDerivationTasks;
 
+import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.Objects;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static org.bitcoinj.walletfx.utils.GuiUtils.*;
+import static org.bitcoinj.walletfx.utils.GuiUtils.checkGuiThread;
+import static org.bitcoinj.walletfx.utils.GuiUtils.fadeIn;
+import static org.bitcoinj.walletfx.utils.GuiUtils.fadeOut;
+import static org.bitcoinj.walletfx.utils.GuiUtils.informationalAlert;
 
 /**
  * User interface for entering a password on demand, e.g. to send money. Also used when encrypting a wallet. Shows a
@@ -61,7 +64,7 @@ public class WalletPasswordController implements OverlayController<WalletPasswor
     private OverlayableStackPaneController rootController;
     private OverlayableStackPaneController.OverlayUI<? extends OverlayController<WalletPasswordController>> overlayUI;
 
-    private SimpleObjectProperty<KeyParameter> aesKey = new SimpleObjectProperty<>();
+    private final SimpleObjectProperty<AesKey> aesKey = new SimpleObjectProperty<>();
 
     @Override
     public void initOverlay(OverlayableStackPaneController overlayableStackPaneController, OverlayableStackPaneController.OverlayUI<? extends OverlayController<WalletPasswordController>> ui) {
@@ -83,10 +86,10 @@ public class WalletPasswordController implements OverlayController<WalletPasswor
         }
 
         final KeyCrypterScrypt keyCrypter = (KeyCrypterScrypt) app.walletAppKit().wallet().getKeyCrypter();
-        checkNotNull(keyCrypter);   // We should never arrive at this GUI if the wallet isn't actually encrypted.
+        Objects.requireNonNull(keyCrypter);   // We should never arrive at this GUI if the wallet isn't actually encrypted.
         KeyDerivationTasks tasks = new KeyDerivationTasks(keyCrypter, password, getTargetTime()) {
             @Override
-            protected final void onFinish(KeyParameter aesKey, int timeTakenMsec) {
+            protected final void onFinish(AesKey aesKey, int timeTakenMsec) {
                 checkGuiThread();
                 if (app.walletAppKit().wallet().checkAESKey(aesKey)) {
                     WalletPasswordController.this.aesKey.set(aesKey);
@@ -114,7 +117,7 @@ public class WalletPasswordController implements OverlayController<WalletPasswor
         overlayUI.done();
     }
 
-    public ReadOnlyObjectProperty<KeyParameter> aesKeyProperty() {
+    public ReadOnlyObjectProperty<AesKey> aesKeyProperty() {
         return aesKey;
     }
 
@@ -124,12 +127,20 @@ public class WalletPasswordController implements OverlayController<WalletPasswor
 
     // Writes the given time to the wallet as a tag so we can find it again in this class.
     public static void setTargetTime(Duration targetTime) {
-        ByteString bytes = ByteString.copyFrom(Longs.toByteArray(targetTime.toMillis()));
+        ByteString bytes = ByteString.copyFrom(longToByteArray(targetTime.toMillis()));
         WalletApplication.instance().walletAppKit().wallet().setTag(TAG, bytes);
     }
 
     // Reads target time or throws if not set yet (should never happen).
     public static Duration getTargetTime() throws IllegalArgumentException {
-        return Duration.ofMillis(Longs.fromByteArray(WalletApplication.instance().walletAppKit().wallet().getTag(TAG).toByteArray()));
+        return Duration.ofMillis(longFromByteArray(WalletApplication.instance().walletAppKit().wallet().getTag(TAG).toByteArray()));
+    }
+
+    private static byte[] longToByteArray(long val) {
+        return ByteBuffer.allocate(8).putLong(val).array();
+    }
+
+    private static long longFromByteArray(byte[] bytes) {
+        return ByteBuffer.wrap(bytes).getLong();
     }
 }

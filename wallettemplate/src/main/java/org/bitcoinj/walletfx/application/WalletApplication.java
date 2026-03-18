@@ -17,22 +17,24 @@
 package org.bitcoinj.walletfx.application;
 
 import com.google.common.util.concurrent.Service;
+import org.bitcoinj.core.Peer;
+import org.jspecify.annotations.Nullable;
 import javafx.application.Platform;
 import javafx.scene.input.KeyCombination;
 import javafx.stage.Stage;
-import org.bitcoinj.core.NetworkParameters;
-import org.bitcoinj.core.Utils;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.base.internal.PlatformUtils;
+import org.bitcoinj.core.Context;
 import org.bitcoinj.kits.WalletAppKit;
-import org.bitcoinj.params.RegTestParams;
-import org.bitcoinj.script.Script;
 import org.bitcoinj.utils.AppDataDirectory;
 import org.bitcoinj.utils.BriefLogFormatter;
 import org.bitcoinj.utils.Threading;
 import org.bitcoinj.wallet.DeterministicSeed;
+import org.bitcoinj.wallet.KeyChainGroupStructure;
 import org.bitcoinj.walletfx.utils.GuiUtils;
 import wallettemplate.WalletSetPasswordController;
 
-import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 
@@ -45,17 +47,23 @@ public abstract class WalletApplication implements AppDelegate {
     private static WalletApplication instance;
     private WalletAppKit walletAppKit;
     private final String applicationName;
-    private final NetworkParameters params;
-    private final Script.ScriptType preferredOutputScriptType;
+    private final BitcoinNetwork network;
+    private final KeyChainGroupStructure keyChainGroupStructure;
+    private final ScriptType preferredOutputScriptType;
     private final String walletFileName;
     private MainWindowController controller;
 
-    public WalletApplication(String applicationName, NetworkParameters params, Script.ScriptType preferredOutputScriptType) {
+    public WalletApplication(String applicationName, BitcoinNetwork network, ScriptType preferredOutputScriptType, KeyChainGroupStructure keyChainGroupStructure) {
         instance = this;
         this.applicationName = applicationName;
-        this.walletFileName = applicationName.replaceAll("[^a-zA-Z0-9.-]", "_") + "-" + params.getPaymentProtocolId();
-        this.params = params;
+        this.walletFileName = applicationName.replaceAll("[^a-zA-Z0-9.-]", "_") + "-" + suffixFromNetwork(network);
+        this.network = network;
         this.preferredOutputScriptType = preferredOutputScriptType;
+        this.keyChainGroupStructure = keyChainGroupStructure;
+    }
+
+    public WalletApplication(String applicationName, BitcoinNetwork network, ScriptType preferredOutputScriptType) {
+        this(applicationName, network, preferredOutputScriptType, KeyChainGroupStructure.BIP43);
     }
 
     public static WalletApplication instance() {
@@ -70,11 +78,11 @@ public abstract class WalletApplication implements AppDelegate {
         return applicationName;
     }
 
-    public NetworkParameters params() {
-        return params;
+    public BitcoinNetwork network() {
+        return network;
     }
 
-    public Script.ScriptType preferredOutputScriptType() {
+    public ScriptType preferredOutputScriptType() {
         return preferredOutputScriptType;
     }
 
@@ -101,7 +109,7 @@ public abstract class WalletApplication implements AppDelegate {
         // Make log output concise.
         BriefLogFormatter.init();
 
-        if (Utils.isMac()) {
+        if (PlatformUtils.isMac()) {
             // We could match the Mac Aqua style here, except that (a) Modena doesn't look that bad, and (b)
             // the date picker widget is kinda broken in AquaFx and I can't be bothered fixing it.
             // AquaFx.style();
@@ -109,10 +117,15 @@ public abstract class WalletApplication implements AppDelegate {
         controller = loadController();
         primaryStage.setScene(controller.scene());
         startWalletAppKit(primaryStage);
-        controller.scene().getAccelerators().put(KeyCombination.valueOf("Shortcut+F"), () -> walletAppKit().peerGroup().getDownloadPeer().close());
+        controller.scene().getAccelerators().put(KeyCombination.valueOf("Shortcut+F"), () -> {
+            Peer peer =  walletAppKit().peerGroup().getDownloadPeer();
+            if (peer != null)
+                peer.close();
+        });
     }
 
     protected void startWalletAppKit(Stage primaryStage) throws IOException {
+        Context.propagate(new Context());
         // Tell bitcoinj to run event handlers on the JavaFX UI thread. This keeps things simple and means
         // we cannot forget to switch threads when adding event handlers. Unfortunately, the DownloadListener
         // we give to the app kit is currently an exception and runs on a library thread. It'll get fixed in
@@ -143,7 +156,7 @@ public abstract class WalletApplication implements AppDelegate {
     public void setupWalletKit(@Nullable DeterministicSeed seed) {
         // If seed is non-null it means we are restoring from backup.
         File appDataDirectory = AppDataDirectory.get(applicationName).toFile();
-        walletAppKit = new WalletAppKit(params, preferredOutputScriptType, null, appDataDirectory, walletFileName) {
+        walletAppKit = new WalletAppKit(network, preferredOutputScriptType, keyChainGroupStructure, appDataDirectory, walletFileName) {
             @Override
             protected void onSetupCompleted() {
                 Platform.runLater(controller::onBitcoinSetup);
@@ -151,7 +164,7 @@ public abstract class WalletApplication implements AppDelegate {
         };
         // Now configure and start the appkit. This will take a second or two - we could show a temporary splash screen
         // or progress widget to keep the user engaged whilst we initialise, but we don't.
-        if (params == RegTestParams.get()) {
+        if (network == BitcoinNetwork.REGTEST) {
             walletAppKit.connectToLocalHost();   // You should run a regtest mode bitcoind locally.
         }
         walletAppKit.setDownloadListener(controller.progressBarUpdater())
@@ -167,5 +180,14 @@ public abstract class WalletApplication implements AppDelegate {
         walletAppKit.awaitTerminated();
         // Forcibly terminate the JVM because Orchid likes to spew non-daemon threads everywhere.
         Runtime.getRuntime().exit(0);
+    }
+
+    protected String suffixFromNetwork(BitcoinNetwork network) {
+        return switch (network) {
+            case MAINNET -> "main";
+            case TESTNET -> "test";
+            case SIGNET -> "signet";
+            case REGTEST -> "regtest";
+        };
     }
 }

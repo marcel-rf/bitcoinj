@@ -16,11 +16,13 @@
 
 package org.bitcoinj.utils;
 
-import java.util.Stack;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.StoredBlock;
 import org.bitcoinj.store.BlockStore;
 import org.bitcoinj.store.BlockStoreException;
+import org.jspecify.annotations.Nullable;
+
+import java.util.Stack;
 
 /**
  * Caching counter for the block versions within a moving window. This class
@@ -74,6 +76,7 @@ public class VersionTally {
      * @return the count for the block version, or null if the window is not yet
      * full.
      */
+    @Nullable
     public Integer getCountAtOrAbove(final long version) {
         if (versionsStored < versionWindow.length) {
             return null;
@@ -102,13 +105,13 @@ public class VersionTally {
         final Stack<Long> versions = new Stack<>();
 
         // We don't know how many blocks back we can go, so load what we can first
-        versions.push(versionBlock.getHeader().getVersion());
+        versions.push(versionBlock.getHeader().version());
         for (int headOffset = 0; headOffset < versionWindow.length; headOffset++) {
             versionBlock = versionBlock.getPrev(blockStore);
             if (null == versionBlock) {
                 break;
             }
-            versions.push(versionBlock.getHeader().getVersion());
+            versions.push(versionBlock.getHeader().version());
         }
 
         // Replay the versions into the tally

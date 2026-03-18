@@ -1,26 +1,31 @@
+import org.gradle.util.GradleVersion
+
 plugins {
     id 'java'
-    id 'eclipse'
 }
 
 dependencies {
     implementation project(':bitcoinj-core')
-    implementation 'info.picocli:picocli:4.6.3'
-    implementation 'org.slf4j:slf4j-jdk14:1.7.36'
+    implementation 'info.picocli:picocli:4.7.6'
+    implementation 'org.slf4j:slf4j-jdk14:2.0.16'
 }
 
-sourceCompatibility = 11
-compileJava.options.encoding = 'UTF-8'
-compileTestJava.options.encoding = 'UTF-8'
+tasks.withType(JavaCompile) {
+    options.compilerArgs.addAll(['--release', '17'])
+    options.compilerArgs << '-Xlint:deprecation'
+    options.encoding = 'UTF-8'
+}
+
 javadoc.options.encoding = 'UTF-8'
-
-compileJava {
-    options.compilerArgs.addAll(['--release', '11'])
-}
 
 task build_checkpoints(type: JavaExec) {
     description = 'Create checkpoint files to use with CheckpointManager.'
-    main = 'org.bitcoinj.tools.BuildCheckpoints'
+    def mainClassString = 'org.bitcoinj.tools.BuildCheckpoints'
+    if (GradleVersion.current() >= GradleVersion.version("8.0")) {
+        mainClass = mainClassString
+    } else {
+        main = mainClassString
+    }
     if (project.hasProperty('appArgs') && appArgs.length() > 0)
         args = Arrays.asList(appArgs.split("\\s+"))
     classpath = sourceSets.main.runtimeClasspath

@@ -16,13 +16,15 @@
 
 package org.bitcoinj.crypto;
 
-import java.util.List;
 import java.util.Locale;
 
 /**
- * <p>This is just a wrapper for the i (child number) as per BIP 32 with a boolean getter for the most significant bit
- * and a getter for the actual 0-based child number. A {@link List} of these forms a <i>path</i> through a
+ * This is just a wrapper for the i (child number) as per BIP 32 with a boolean getter for the most significant bit
+ * and a getter for the actual 0-based child number. A list of these forms a <i>path</i> through a
  * {@link DeterministicHierarchy}. This class is immutable.
+ * <p>
+ * This is a value-based class; use of identity-sensitive operations (including reference equality (==), identity
+ * hash code, or synchronization) on instances of {@code ChildNumber} may have unpredictable results and should be avoided.
  */
 public class ChildNumber implements Comparable<ChildNumber> {
     /**
@@ -39,6 +41,18 @@ public class ChildNumber implements Comparable<ChildNumber> {
     public static final ChildNumber ONE = new ChildNumber(1);
     public static final ChildNumber ONE_HARDENED = new ChildNumber(1, true);
 
+    // See BIP-43, Purpose Field for Deterministic Wallets: https://github.com/bitcoin/bips/blob/master/bip-0043.mediawiki
+    public static final ChildNumber PURPOSE_BIP44 = new ChildNumber(44, true);  // P2PKH
+    public static final ChildNumber PURPOSE_BIP49 = new ChildNumber(49, true);  // P2WPKH-nested-in-P2SH
+    public static final ChildNumber PURPOSE_BIP84 = new ChildNumber(84, true);  // P2WPKH
+    public static final ChildNumber PURPOSE_BIP86 = new ChildNumber(86, true);  // P2TR
+
+    public static final ChildNumber COINTYPE_BTC = new ChildNumber(0, true);    // MainNet
+    public static final ChildNumber COINTYPE_TBTC = new ChildNumber(1, true);   // TestNet
+
+    public static final ChildNumber CHANGE_RECEIVING = new ChildNumber(0, false);
+    public static final ChildNumber CHANGE_CHANGE = new ChildNumber(1, false);
+
     /** Integer i as per BIP 32 spec, including the MSB denoting derivation type (0 = public, 1 = private) **/
     private final int i;
 
@@ -50,6 +64,21 @@ public class ChildNumber implements Comparable<ChildNumber> {
 
     public ChildNumber(int i) {
         this.i = i;
+    }
+
+    /**
+     * Parse a single child number.
+     *
+     * @param str string of the form "1" or "1H"
+     * @return child number instance
+     * @throws NumberFormatException when parsing fails
+     */
+    public static ChildNumber parse(String str) {
+        boolean isHard = str.endsWith("H");
+        String nodeNumber = isHard ?
+                str.substring(0, str.length() - 1) :
+                str;
+        return new ChildNumber(Integer.parseInt(nodeNumber.trim()), isHard);
     }
 
     /** Returns the uint32 encoded form of the path element, including the most significant bit. */

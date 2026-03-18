@@ -29,8 +29,4 @@ package org.bitcoinj.core;
 public class SendHeadersMessage extends EmptyMessage {
     public SendHeadersMessage() {
     }
-
-    // this is needed by the BitcoinSerializer
-    public SendHeadersMessage(NetworkParameters params, byte[] payload) {
-    }
 }

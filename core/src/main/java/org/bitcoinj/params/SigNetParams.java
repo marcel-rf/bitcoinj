@@ -16,39 +16,39 @@
 
 package org.bitcoinj.params;
 
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Difficulty;
 import org.bitcoinj.core.Block;
-import org.bitcoinj.core.Sha256Hash;
-import org.bitcoinj.core.Utils;
+import org.bitcoinj.base.Sha256Hash;
+import org.jspecify.annotations.Nullable;
 
-import static com.google.common.base.Preconditions.checkState;
+import java.time.Instant;
+
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * <p>Parameters for the signet, a separate public instance of Bitcoin that has relaxed rules suitable for development
  * and testing of applications and new Bitcoin versions.</p>
  * <p>See <a href="https://github.com/bitcoin/bips/blob/master/bip-0325.mediawiki">BIP325</a>
  */
-public class SigNetParams extends AbstractBitcoinNetParams {
+public class SigNetParams extends BitcoinNetworkParams {
     public static final int TESTNET_MAJORITY_WINDOW = 100;
     public static final int TESTNET_MAJORITY_REJECT_BLOCK_OUTDATED = 75;
     public static final int TESTNET_MAJORITY_ENFORCE_BLOCK_UPGRADE = 51;
-    private static final long GENESIS_DIFFICULTY = 0x1e0377ae;
-    private static final long GENESIS_TIME = 1598918400;
+    private static final Difficulty GENESIS_DIFFICULTY = Difficulty.ofCompact(0x1e0377ae);
+    private static final Instant GENESIS_TIME = Instant.ofEpochSecond(1598918400);
     private static final long GENESIS_NONCE = 52613770;
     private static final Sha256Hash GENESIS_HASH = Sha256Hash.wrap("00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6");
 
     public SigNetParams() {
-        super();
-        id = ID_SIGNET;
+        super(BitcoinNetwork.SIGNET);
 
         targetTimespan = TARGET_TIMESPAN;
-        maxTarget = Utils.decodeCompactBits(Block.EASIEST_DIFFICULTY_TARGET);
+        maxTarget = Difficulty.EASIEST_DIFFICULTY_TARGET;
 
         port = 38333;
         packetMagic = 0x0a03cf40;
         dumpedPrivateKeyHeader = 239;
-        addressHeader = 0x6f;
-        p2shHeader = 196;
-        segwitAddressHrp = "tb";
         spendableCoinbaseDepth = 100;
         bip32HeaderP2PKHpub = 0x043587cf; // The 4 byte header that serializes in base58 to "tpub".
         bip32HeaderP2PKHpriv = 0x04358394; // The 4 byte header that serializes in base58 to "tprv"
@@ -60,13 +60,13 @@ public class SigNetParams extends AbstractBitcoinNetParams {
         majorityWindow = TESTNET_MAJORITY_WINDOW;
 
         dnsSeeds = new String[] {
-                "seed.signet.bitcoin.sprovoost.nl",
+                "seed.signet.bitcoin.sprovoost.nl", // Sjors Provoost
+                "seed.signet.achownodes.xyz",       // Ava Chow
         };
-        httpSeeds = null;
         addrSeeds = null;
     }
 
-    private static SigNetParams instance;
+    @Nullable private static SigNetParams instance;
     public static synchronized SigNetParams get() {
         if (instance == null) {
             instance = new SigNetParams();
@@ -78,18 +78,11 @@ public class SigNetParams extends AbstractBitcoinNetParams {
     public Block getGenesisBlock() {
         synchronized (GENESIS_HASH) {
             if (genesisBlock == null) {
-                genesisBlock = Block.createGenesis(this);
-                genesisBlock.setDifficultyTarget(GENESIS_DIFFICULTY);
-                genesisBlock.setTime(GENESIS_TIME);
-                genesisBlock.setNonce(GENESIS_NONCE);
-                checkState(genesisBlock.getHash().equals(GENESIS_HASH), "Invalid genesis hash");
+                genesisBlock = Block.createGenesis(GENESIS_TIME, GENESIS_DIFFICULTY, GENESIS_NONCE);
+                checkState(genesisBlock.getHash().equals(GENESIS_HASH), () ->
+                        "invalid genesis hash");
             }
         }
         return genesisBlock;
-    }
-
-    @Override
-    public String getPaymentProtocolId() {
-        return PAYMENT_PROTOCOL_ID_SIGNET;
     }
 }

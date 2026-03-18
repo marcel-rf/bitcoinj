@@ -17,12 +17,10 @@
 
 package org.bitcoinj.wallet;
 
-import org.bitcoinj.crypto.ChildNumber;
+import org.bitcoinj.base.ScriptType;
 import org.bitcoinj.crypto.DeterministicKey;
+import org.bitcoinj.crypto.HDPath;
 import org.bitcoinj.crypto.KeyCrypter;
-import org.bitcoinj.script.Script;
-
-import java.util.List;
 
 /**
  * Factory interface for creation keychains while de-serializing a wallet.
@@ -31,37 +29,33 @@ public interface KeyChainFactory {
     /**
      * Make a keychain (but not a watching one) with the specified account path
      *
-     * @param seed the seed
-     * @param crypter the encrypted/decrypter
-     * @param isMarried whether the keychain is leading in a marriage
+     * @param seed             the seed
+     * @param crypter          the encrypted/decrypter
      * @param outputScriptType type of addresses (aka output scripts) to generate for receiving
-     * @param accountPath account path to generate receiving addresses on
+     * @param accountPath      account path to generate receiving addresses on
      */
-    DeterministicKeyChain makeKeyChain(DeterministicSeed seed, KeyCrypter crypter, boolean isMarried,
-            Script.ScriptType outputScriptType, List<ChildNumber> accountPath);
+    DeterministicKeyChain makeKeyChain(DeterministicSeed seed, KeyCrypter crypter,
+                                       ScriptType outputScriptType, HDPath.HDPartialPath accountPath);
 
     /**
      * Make a watching keychain.
      *
      * <p>isMarried and isFollowingKey must not be true at the same time.
      *
-     * @param accountKey the account extended public key
-     * @param isFollowingKey whether the keychain is following in a marriage
-     * @param isMarried whether the keychain is leading in a marriage
+     * @param accountKey       the account extended public key
      * @param outputScriptType type of addresses (aka output scripts) to generate for watching
      */
-    DeterministicKeyChain makeWatchingKeyChain(DeterministicKey accountKey, boolean isFollowingKey, boolean isMarried,
-            Script.ScriptType outputScriptType) throws UnreadableWalletException;
+    DeterministicKeyChain makeWatchingKeyChain(DeterministicKey accountKey,
+                                               ScriptType outputScriptType) throws UnreadableWalletException;
 
     /**
      * Make a spending keychain.
      *
      * <p>isMarried and isFollowingKey must not be true at the same time.
      *
-     * @param accountKey the account extended public key
-     * @param isMarried whether the keychain is leading in a marriage
+     * @param accountKey       the account extended public key
      * @param outputScriptType type of addresses (aka output scripts) to generate for spending
      */
-    DeterministicKeyChain makeSpendingKeyChain(DeterministicKey accountKey, boolean isMarried,
-            Script.ScriptType outputScriptType) throws UnreadableWalletException;
+    DeterministicKeyChain makeSpendingKeyChain(DeterministicKey accountKey,
+                                               ScriptType outputScriptType) throws UnreadableWalletException;
 }

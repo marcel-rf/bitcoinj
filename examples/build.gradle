@@ -1,19 +1,17 @@
 plugins {
     id 'java'
-    id 'eclipse'
 }
 
 dependencies {
     implementation project(':bitcoinj-core')
-    implementation 'info.picocli:picocli:4.6.3'
-    implementation 'org.slf4j:slf4j-jdk14:1.7.36'
+    implementation 'info.picocli:picocli:4.7.6'
+    implementation 'org.slf4j:slf4j-jdk14:2.0.16'
 }
 
-sourceCompatibility = 11
-compileJava.options.encoding = 'UTF-8'
-compileTestJava.options.encoding = 'UTF-8'
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['--release', '17'])
+    options.compilerArgs << '-Xlint:deprecation'
+}
+
 javadoc.options.encoding = 'UTF-8'
-
-compileJava {
-    options.compilerArgs.addAll(['--release', '11'])
-}

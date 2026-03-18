@@ -17,14 +17,21 @@
 
 package org.bitcoinj.net.discovery;
 
-import org.bitcoinj.core.*;
-import org.bitcoinj.utils.*;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.core.Services;
+import org.bitcoinj.core.VersionMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.*;
-import java.util.*;
-import java.util.concurrent.*;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * <p>Supports peer discovery through DNS.</p>
@@ -33,7 +40,7 @@ import java.util.concurrent.*;
  * However, if all hosts passed fail to resolve a PeerDiscoveryException will be thrown during getPeers().
  * </p>
  *
- * <p>DNS seeds do not attempt to enumerate every peer on the network. {@link DnsDiscovery#getPeers(long, long, TimeUnit)}
+ * <p>DNS seeds do not attempt to enumerate every peer on the network. {@link DnsDiscovery#getPeers(long, Duration)}
  * will return up to 30 random peers from the set of those returned within the timeout period. If you want more peers
  * to connect to, you need to discover them via other means (like addr broadcasts).</p>
  */
@@ -43,38 +50,37 @@ public class DnsDiscovery extends MultiplexingDiscovery {
     /**
      * Supports finding peers through DNS A records. Community run DNS entry points will be used.
      *
-     * @param netParams Network parameters to be used for port information.
+     * @param network Network to be used for port information.
      */
-    public DnsDiscovery(NetworkParameters netParams) {
-        this(netParams.getDnsSeeds(), netParams);
+    public DnsDiscovery(Network network) {
+        this(NetworkParameters.of(network).getDnsSeeds(), network);
     }
 
     /**
      * Supports finding peers through DNS A records.
      *
      * @param dnsSeeds Host names to be examined for seed addresses.
-     * @param params Network parameters to be used for port information.
+     * @param network Network to be used for port information.
      */
-    public DnsDiscovery(String[] dnsSeeds, NetworkParameters params) {
-        super(params, buildDiscoveries(params, dnsSeeds));
+    public DnsDiscovery(String[] dnsSeeds, Network network) {
+        super(network, buildDiscoveries(network, dnsSeeds));
     }
 
-    private static List<PeerDiscovery> buildDiscoveries(NetworkParameters params, String[] seeds) {
+    private static List<PeerDiscovery> buildDiscoveries(Network network, String[] seeds) {
         List<PeerDiscovery> discoveries = new ArrayList<>();
         if (seeds != null)
             for (String seed : seeds)
-                discoveries.add(new DnsSeedDiscovery(params, seed));
+                discoveries.add(new DnsSeedDiscovery(network, seed));
         return discoveries;
     }
 
     @Override
     protected ExecutorService createExecutor() {
-        // Attempted workaround for reported bugs on Linux in which gethostbyname does not appear to be properly
-        // thread safe and can cause segfaults on some libc versions.
-        if (Utils.isLinux())
-            return Executors.newSingleThreadExecutor(new ContextPropagatingThreadFactory("DNS seed lookups"));
-        else
-            return Executors.newFixedThreadPool(seeds.size(), new DaemonThreadFactory("DNS seed lookups"));
+        return Executors.newFixedThreadPool(seeds.size(), r -> {
+            Thread thread = new Thread(Thread.currentThread().getThreadGroup(), r, "DNS seed lookups", 0);
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     /** Implements discovery from a single DNS host. */
@@ -82,17 +88,17 @@ public class DnsDiscovery extends MultiplexingDiscovery {
         private final String hostname;
         private final NetworkParameters params;
 
-        public DnsSeedDiscovery(NetworkParameters params, String hostname) {
+        public DnsSeedDiscovery(Network network, String hostname) {
             this.hostname = hostname;
-            this.params = params;
+            this.params = NetworkParameters.of(network);
         }
 
         @Override
-        public List<InetSocketAddress> getPeers(long services, long timeoutValue, TimeUnit timeoutUnit) throws PeerDiscoveryException {
+        public List<InetSocketAddress> getPeers(long services, Duration timeout) throws PeerDiscoveryException {
             InetAddress[] response = null;
             if (services != 0) {
                 String hostnameWithServices = "x" + Long.toHexString(services) + "." + hostname;
-                log.info("Requesting {} peers from {}", VersionMessage.toStringServices(services),
+                log.info("Requesting {} peers from {}", Services.of(services).toString(),
                         hostnameWithServices);
                 try {
                     response = InetAddress.getAllByName(hostnameWithServices);

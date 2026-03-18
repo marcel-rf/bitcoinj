@@ -16,17 +16,20 @@
 
 package org.bitcoinj.examples;
 
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.core.BlockChain;
+import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.core.PeerGroup;
 import org.bitcoinj.core.listeners.DownloadProgressTracker;
-import org.bitcoinj.core.*;
 import org.bitcoinj.net.discovery.DnsDiscovery;
-import org.bitcoinj.params.TestNet3Params;
-import org.bitcoinj.script.Script;
 import org.bitcoinj.store.SPVBlockStore;
 import org.bitcoinj.wallet.DeterministicSeed;
-import org.bitcoinj.wallet.KeyChainGroupStructure;
 import org.bitcoinj.wallet.Wallet;
 
 import java.io.File;
+import java.time.Instant;
 
 /**
  * The following example shows you how to restore a HD wallet from a previously generated deterministic seed.
@@ -35,7 +38,8 @@ import java.io.File;
 public class RestoreFromSeed {
 
     public static void main(String[] args) throws Exception {
-        NetworkParameters params = TestNet3Params.get();
+        Network network = BitcoinNetwork.TESTNET;
+        NetworkParameters params = NetworkParameters.of(network);
 
         // Bitcoinj supports hierarchical deterministic wallets (or "HD Wallets"): https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
         // HD wallets allow you to restore your wallet simply from a root seed. This seed can be represented using a short mnemonic sentence as described in BIP 39: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
@@ -43,12 +47,12 @@ public class RestoreFromSeed {
         // Here we restore our wallet from a seed with no passphrase. Also have a look at the BackupToMnemonicSeed.java example that shows how to backup a wallet by creating a mnemonic sentence.
         String seedCode = "yard impulse luxury drive today throw farm pepper survey wreck glass federal";
         String passphrase = "";
-        Long creationtime = 1409478661L;
+        Instant creationtime = Instant.ofEpochSecond(1409478661L);
 
-        DeterministicSeed seed = new DeterministicSeed(seedCode, null, passphrase, creationtime);
+        DeterministicSeed seed = DeterministicSeed.ofMnemonic(seedCode, passphrase, creationtime);
 
         // The wallet class provides a easy fromSeed() function that loads a new wallet from a given seed.
-        Wallet wallet = Wallet.fromSeed(params, seed, Script.ScriptType.P2PKH);
+        Wallet wallet = Wallet.fromSeed(network, seed, ScriptType.P2PKH);
 
         // Because we are importing an existing wallet which might already have transactions we must re-download the blockchain to make the wallet picks up these transactions
         // You can find some information about this in the guides: https://bitcoinj.github.io/working-with-the-wallet#setup
@@ -62,9 +66,9 @@ public class RestoreFromSeed {
 
         // Setting up the BlochChain, the BlocksStore and connecting to the network.
         SPVBlockStore chainStore = new SPVBlockStore(params, chainFile);
-        BlockChain chain = new BlockChain(params, chainStore);
-        PeerGroup peerGroup = new PeerGroup(params, chain);
-        peerGroup.addPeerDiscovery(new DnsDiscovery(params));
+        BlockChain chain = new BlockChain(network, chainStore);
+        PeerGroup peerGroup = new PeerGroup(network, chain);
+        peerGroup.addPeerDiscovery(new DnsDiscovery(network));
 
         // Now we need to hook the wallet up to the blockchain and the peers. This registers event listeners that notify our wallet about new transactions.
         chain.addWallet(wallet);

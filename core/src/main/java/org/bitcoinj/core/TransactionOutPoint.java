@@ -17,105 +17,174 @@
 
 package org.bitcoinj.core;
 
-import org.bitcoinj.script.*;
-import org.bitcoinj.wallet.*;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.base.internal.ByteUtils;
+import org.bitcoinj.crypto.ECKey;
+import org.bitcoinj.script.Script;
+import org.bitcoinj.script.ScriptError;
+import org.bitcoinj.script.ScriptException;
+import org.bitcoinj.script.ScriptPattern;
+import org.bitcoinj.wallet.KeyBag;
+import org.bitcoinj.wallet.RedeemData;
 
-import javax.annotation.*;
-import java.io.*;
+import org.jspecify.annotations.Nullable;
+import java.nio.BufferOverflowException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
 import java.util.Objects;
 
-import static com.google.common.base.Preconditions.*;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * <p>This message is a reference or pointer to an output of a different transaction.</p>
  * 
  * <p>Instances of this class are not safe for use by multiple threads.</p>
  */
-public class TransactionOutPoint extends ChildMessage {
+public class TransactionOutPoint {
+    public static final int BYTES = 36;
 
-    static final int MESSAGE_LENGTH = 36;
+    /** Special outpoint that normally marks a coinbase input. It's also used as a test dummy. */
+    public static final TransactionOutPoint UNCONNECTED =
+            TransactionOutPoint.of(Sha256Hash.ZERO_HASH, ByteUtils.MAX_UNSIGNED_INTEGER);
 
     /** Hash of the transaction to which we refer. */
-    private Sha256Hash hash;
+    private final Sha256Hash hash;
     /** Which output of that transaction we are talking about. */
-    private long index;
+    private final long index;
+
+    // `fromTx` and `connectedOutput` can both be `null`, but they can't both be non-`null`.
 
     // This is not part of bitcoin serialization. It points to the connected transaction.
-    Transaction fromTx;
+    @Nullable
+    private final Transaction fromTx;
 
     // The connected output.
-    TransactionOutput connectedOutput;
+    @Nullable
+    private final TransactionOutput connectedOutput;
 
-    public TransactionOutPoint(NetworkParameters params, long index, @Nullable Transaction fromTx) {
-        super(params);
+    /**
+     * Deserialize this transaction outpoint from a given payload.
+     *
+     * @param payload payload to deserialize from
+     * @return read transaction outpoint
+     * @throws BufferUnderflowException if the read message extends beyond the remaining bytes of the payload
+     */
+    public static TransactionOutPoint read(ByteBuffer payload) throws BufferUnderflowException, ProtocolException {
+        Sha256Hash hash = Sha256Hash.read(payload);
+        long index = ByteUtils.readUint32(payload);
+        return TransactionOutPoint.of(hash, index);
+    }
+
+    /** @deprecated use {@link TransactionOutPoint#from(Transaction, long)} */
+    @Deprecated
+    public TransactionOutPoint(long index, Transaction fromTx) {
+        this(fromTx.getTxId(), index, fromTx, null);
+    }
+
+    @Deprecated
+    public TransactionOutPoint(long index, Sha256Hash hash) {
+        this(hash, index, null, null);
+    }
+
+    private TransactionOutPoint(Sha256Hash hash, long index) {
+        this(hash, index, null, null);
+    }
+
+    /** @deprecated use {@link TransactionOutPoint#from(TransactionOutput)} */
+    @Deprecated
+    public TransactionOutPoint(TransactionOutput connectedOutput) {
+        this(connectedOutput.getParentTransactionHash(), connectedOutput.getIndex(), null, connectedOutput);
+    }
+
+    /**
+     * Create a simple {@code TransactionOutPoint} with only {@code txid} and {@code index}.
+     * @param hash Transaction ID of the referenced transaction
+     * @param index Output index of the referenced output
+     * @return a new transaction outpoint
+     */
+    public static TransactionOutPoint of(Sha256Hash hash, long index) {
+        return new TransactionOutPoint(hash, index);
+    }
+
+    /**
+     * Create a {@code TransactionOutPoint} <i>from</i> an existing {@link Transaction}.
+     * @param fromTx transaction the new outpoint will reference (and be "connected to")
+     * @param index index of the transaction output the new outpoint will reference
+     * @return a new transaction outpoint
+     */
+    public static TransactionOutPoint from(Transaction fromTx, long index) {
+        return new TransactionOutPoint (fromTx.getTxId(), index, fromTx, null);
+    }
+
+    /**
+     * Create a {@code TransactionOutPoint} <i>from</i> an existing {@link TransactionOutput}.
+     * @param connectedOutput transaction output the new outpoint will reference (and be "connected to")
+     * @return a new transaction outpoint
+     */
+    public static TransactionOutPoint from(TransactionOutput connectedOutput) {
+        return new TransactionOutPoint(connectedOutput.getParentTransactionHash(), connectedOutput.getIndex(), null,
+                connectedOutput);
+    }
+
+    private TransactionOutPoint(Sha256Hash hash, long index, @Nullable Transaction fromTx,
+                                @Nullable TransactionOutput connectedOutput) {
+        this.hash = Objects.requireNonNull(hash);
+        checkArgument(index >= 0 && index <= ByteUtils.MAX_UNSIGNED_INTEGER, () ->
+                "index out of range: " + index);
         this.index = index;
         if (fromTx != null) {
-            this.hash = fromTx.getTxId();
-            this.fromTx = fromTx;
-        } else {
-            // This happens when constructing the genesis block.
-            hash = Sha256Hash.ZERO_HASH;
+            TransactionOutput outputFromTx = fromTx.getOutput(index);
+            Objects.requireNonNull(outputFromTx);
+            checkArgument(connectedOutput == null, () -> "Both fromTx and connectedOutput are non-null");
         }
-        length = MESSAGE_LENGTH;
-    }
-
-    public TransactionOutPoint(NetworkParameters params, long index, Sha256Hash hash) {
-        super(params);
-        this.index = index;
-        this.hash = hash;
-        length = MESSAGE_LENGTH;
-    }
-
-    public TransactionOutPoint(NetworkParameters params, TransactionOutput connectedOutput) {
-        this(params, connectedOutput.getIndex(), connectedOutput.getParentTransactionHash());
+        this.fromTx = fromTx;
         this.connectedOutput = connectedOutput;
     }
 
     /**
-    /**
-     * Deserializes the message. This is usually part of a transaction message.
+     * Write this transaction outpoint into the given buffer.
+     *
+     * @param buf buffer to write into
+     * @return the buffer
+     * @throws BufferOverflowException if the outpoint doesn't fit the remaining buffer
      */
-    public TransactionOutPoint(NetworkParameters params, byte[] payload, int offset) throws ProtocolException {
-        super(params, payload, offset);
+    public ByteBuffer write(ByteBuffer buf) throws BufferOverflowException {
+        hash.write(buf);
+        ByteUtils.writeInt32LE(index, buf);
+        return buf;
     }
 
     /**
-     * Deserializes the message. This is usually part of a transaction message.
-     * @param params NetworkParameters object.
-     * @param offset The location of the first payload byte within the array.
-     * @param serializer the serializer to use for this message.
-     * @throws ProtocolException
+     * Allocates a byte array and writes this transaction outpoint into it.
+     *
+     * @return byte array containing the transaction outpoint
      */
-    public TransactionOutPoint(NetworkParameters params, byte[] payload, int offset, Message parent, MessageSerializer serializer) throws ProtocolException {
-        super(params, payload, offset, parent, serializer, MESSAGE_LENGTH);
-    }
-
-    @Override
-    protected void parse() throws ProtocolException {
-        length = MESSAGE_LENGTH;
-        hash = readHash();
-        index = readUint32();
-    }
-
-    @Override
-    protected void bitcoinSerializeToStream(OutputStream stream) throws IOException {
-        stream.write(hash.getReversedBytes());
-        Utils.uint32ToByteStreamLE(index, stream);
+    public byte[] serialize() {
+        return write(ByteBuffer.allocate(BYTES)).array();
     }
 
     /**
      * An outpoint is a part of a transaction input that points to the output of another transaction. If we have both
-     * sides in memory, and they have been linked together, this returns a pointer to the connected output, or null
-     * if there is no such connection.
+     * sides in memory, and they have been linked together, this returns a pointer to the connected output, or {@code
+     * null} if we don't have the output. In the latter case, {@link #hash()} and {@link #index()} could be used to
+     * acquire the output elsewhere.
+     *
+     * @return output this outpoint points to, or {@code null} if we don't have the output
      */
     @Nullable
     public TransactionOutput getConnectedOutput() {
-        if (fromTx != null) {
-            return fromTx.getOutputs().get((int) index);
-        } else if (connectedOutput != null) {
-            return connectedOutput;
-        }
-        return null;
+        return (fromTx != null) ? fromTx.getOutput(index) : connectedOutput;
+    }
+
+    /**
+     * Return the connected {@link Transaction} if available.
+     * @return connected transaction or {@code null} if not available
+     */
+    @Nullable
+    public Transaction getFromTx() {
+        return fromTx;
     }
 
     /**
@@ -123,7 +192,7 @@ public class TransactionOutPoint extends ChildMessage {
      * @throws java.lang.NullPointerException if there is no connected output.
      */
     public byte[] getConnectedPubKeyScript() {
-        byte[] result = checkNotNull(getConnectedOutput()).getScriptBytes();
+        byte[] result = Objects.requireNonNull(getConnectedOutput()).getScriptBytes();
         checkState(result.length > 0);
         return result;
     }
@@ -139,14 +208,14 @@ public class TransactionOutPoint extends ChildMessage {
     @Nullable
     public ECKey getConnectedKey(KeyBag keyBag) throws ScriptException {
         TransactionOutput connectedOutput = getConnectedOutput();
-        checkNotNull(connectedOutput, "Input is not connected so cannot retrieve key");
+        Objects.requireNonNull(connectedOutput, "Input is not connected so cannot retrieve key");
         Script connectedScript = connectedOutput.getScriptPubKey();
         if (ScriptPattern.isP2PKH(connectedScript)) {
             byte[] addressBytes = ScriptPattern.extractHashFromP2PKH(connectedScript);
-            return keyBag.findKeyFromPubKeyHash(addressBytes, Script.ScriptType.P2PKH);
+            return keyBag.findKeyFromPubKeyHash(addressBytes, ScriptType.P2PKH);
         } else if (ScriptPattern.isP2WPKH(connectedScript)) {
             byte[] addressBytes = ScriptPattern.extractHashFromP2WH(connectedScript);
-            return keyBag.findKeyFromPubKeyHash(addressBytes, Script.ScriptType.P2WPKH);
+            return keyBag.findKeyFromPubKeyHash(addressBytes, ScriptType.P2WPKH);
         } else if (ScriptPattern.isP2PK(connectedScript)) {
             byte[] pubkeyBytes = ScriptPattern.extractKeyFromP2PK(connectedScript);
             return keyBag.findKeyFromPubKey(pubkeyBytes);
@@ -165,14 +234,14 @@ public class TransactionOutPoint extends ChildMessage {
     @Nullable
     public RedeemData getConnectedRedeemData(KeyBag keyBag) throws ScriptException {
         TransactionOutput connectedOutput = getConnectedOutput();
-        checkNotNull(connectedOutput, "Input is not connected so cannot retrieve key");
+        Objects.requireNonNull(connectedOutput, "Input is not connected so cannot retrieve key");
         Script connectedScript = connectedOutput.getScriptPubKey();
         if (ScriptPattern.isP2PKH(connectedScript)) {
             byte[] addressBytes = ScriptPattern.extractHashFromP2PKH(connectedScript);
-            return RedeemData.of(keyBag.findKeyFromPubKeyHash(addressBytes, Script.ScriptType.P2PKH), connectedScript);
+            return RedeemData.of(keyBag.findKeyFromPubKeyHash(addressBytes, ScriptType.P2PKH), connectedScript);
         } else if (ScriptPattern.isP2WPKH(connectedScript)) {
             byte[] addressBytes = ScriptPattern.extractHashFromP2WH(connectedScript);
-            return RedeemData.of(keyBag.findKeyFromPubKeyHash(addressBytes, Script.ScriptType.P2WPKH), connectedScript);
+            return RedeemData.of(keyBag.findKeyFromPubKeyHash(addressBytes, ScriptType.P2WPKH), connectedScript);
         } else if (ScriptPattern.isP2PK(connectedScript)) {
             byte[] pubkeyBytes = ScriptPattern.extractKeyFromP2PK(connectedScript);
             return RedeemData.of(keyBag.findKeyFromPubKey(pubkeyBytes), connectedScript);
@@ -184,6 +253,33 @@ public class TransactionOutPoint extends ChildMessage {
         }
     }
 
+    /**
+     * Returns a copy of this outpoint, but without either {@code fromTx} or {@code connectedOutput}.
+     * @return outpoint with no connections
+     */
+    public TransactionOutPoint disconnectOutput() {
+        return new TransactionOutPoint(hash, index, null, null);
+    }
+
+    /**
+     * Returns a copy of this outpoint, but with the provided transaction as fromTx.
+     * @param transaction transaction to set as fromTx
+     * @return outpoint with fromTx set
+     */
+    public TransactionOutPoint connectTransaction(Transaction transaction) {
+        return new TransactionOutPoint(hash, index, Objects.requireNonNull(transaction), null);
+    }
+
+    /**
+     * Returns a copy of this outpoint, but with fromTx removed.
+     * @return outpoint with removed fromTx
+     * @deprecated use {@link #disconnectOutput()}
+     */
+    @Deprecated
+    public TransactionOutPoint disconnectTransaction() {
+        return disconnectOutput();
+    }
+
     @Override
     public String toString() {
         return hash + ":" + index;
@@ -192,31 +288,15 @@ public class TransactionOutPoint extends ChildMessage {
     /**
      * Returns the hash of the transaction this outpoint references/spends/is connected to.
      */
-    @Override
-    public Sha256Hash getHash() {
+    public Sha256Hash hash() {
         return hash;
     }
 
     /**
-     * @param hash new hash
-     * @deprecated Don't mutate this class -- create a new instance instead.
+     * @return the index of this outpoint
      */
-    @Deprecated
-    void setHash(Sha256Hash hash) {
-        this.hash = hash;
-    }
-
-    public long getIndex() {
+    public long index() {
         return index;
-    }
-
-    /**
-     * @param index new index
-     * @deprecated Don't mutate this class -- create a new instance instead.
-     */
-    @Deprecated
-    public void setIndex(long index) {
-        this.index = index;
     }
 
     @Override
@@ -224,11 +304,11 @@ public class TransactionOutPoint extends ChildMessage {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         TransactionOutPoint other = (TransactionOutPoint) o;
-        return getIndex() == other.getIndex() && getHash().equals(other.getHash());
+        return index == other.index && hash.equals(other.hash);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(getIndex(), getHash());
+        return Objects.hash(index, hash);
     }
 }

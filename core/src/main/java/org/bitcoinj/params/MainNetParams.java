@@ -17,41 +17,36 @@
 
 package org.bitcoinj.params;
 
-import java.net.URI;
-
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Difficulty;
 import org.bitcoinj.core.Block;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.Sha256Hash;
-import org.bitcoinj.core.Utils;
-import org.bitcoinj.net.discovery.HttpDiscovery;
+import org.bitcoinj.base.Sha256Hash;
+import org.jspecify.annotations.Nullable;
 
+import java.time.Instant;
 
-import static com.google.common.base.Preconditions.checkState;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * Parameters for the main production network on which people trade goods and services.
  */
-public class MainNetParams extends AbstractBitcoinNetParams {
+public class MainNetParams extends BitcoinNetworkParams {
     public static final int MAINNET_MAJORITY_WINDOW = 1000;
     public static final int MAINNET_MAJORITY_REJECT_BLOCK_OUTDATED = 950;
     public static final int MAINNET_MAJORITY_ENFORCE_BLOCK_UPGRADE = 750;
-    private static final long GENESIS_TIME = 1231006505;
+    private static final Instant GENESIS_TIME = Instant.ofEpochSecond(1231006505);
     private static final long GENESIS_NONCE = 2083236893;
     private static final Sha256Hash GENESIS_HASH = Sha256Hash.wrap("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
 
     public MainNetParams() {
-        super();
-        id = ID_MAINNET;
+        super(BitcoinNetwork.MAINNET);
 
         targetTimespan = TARGET_TIMESPAN;
-        maxTarget = Utils.decodeCompactBits(Block.STANDARD_MAX_DIFFICULTY_TARGET);
+        maxTarget = Difficulty.STANDARD_MAX_DIFFICULTY_TARGET;
 
         port = 8333;
-        packetMagic = 0xf9beb4d9L;
+        packetMagic = 0xf9beb4d9;
         dumpedPrivateKeyHeader = 128;
-        addressHeader = 0;
-        p2shHeader = 5;
-        segwitAddressHrp = "bc";
         spendableCoinbaseDepth = 100;
         bip32HeaderP2PKHpub = 0x0488b21e; // The 4 byte header that serializes in base58 to "xpub".
         bip32HeaderP2PKHpriv = 0x0488ade4; // The 4 byte header that serializes in base58 to "xprv"
@@ -75,25 +70,13 @@ public class MainNetParams extends AbstractBitcoinNetParams {
         dnsSeeds = new String[] {
                 "seed.bitcoin.sipa.be",         // Pieter Wuille
                 "dnsseed.bluematt.me",          // Matt Corallo
-                "dnsseed.bitcoin.dashjr.org",   // Luke Dashjr
-                "seed.bitcoinstats.com",        // Chris Decker
+                "dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us", // Luke Dashjr
                 "seed.bitcoin.jonasschnelli.ch",// Jonas Schnelli
-                "seed.btc.petertodd.org",       // Peter Todd
+                "seed.btc.petertodd.net",       // Peter Todd
                 "seed.bitcoin.sprovoost.nl",    // Sjors Provoost
                 "dnsseed.emzy.de",              // Stephan Oeste
                 "seed.bitcoin.wiz.biz",         // Jason Maurice
-        };
-        httpSeeds = new HttpDiscovery.Details[] {
-                // Andreas Schildbach
-                new HttpDiscovery.Details(
-                        ECKey.fromPublicOnly(Utils.HEX.decode("0238746c59d46d5408bf8b1d0af5740fe1a6e1703fcb56b2953f0b965c740d256f")),
-                        URI.create("http://httpseed.bitcoin.schildbach.de/peers")
-                ),
-                // Anton Kumaigorodski
-                new HttpDiscovery.Details(
-                        ECKey.fromPublicOnly(Utils.HEX.decode("02c682e83db4efac3c841d6fa544211fb1e4a55061060019b3682fc306f228c558")),
-                        URI.create("http://lightning-wallet.com:8081/peers")
-                )
+                "seed.mainnet.achownodes.xyz",  // Ava Chow
         };
 
         // These are in big-endian format, which is what the SeedPeers code expects.
@@ -121,7 +104,7 @@ public class MainNetParams extends AbstractBitcoinNetParams {
                 0x23159dd8, 0x368fea55, 0x50bd4031, 0x5395de6c, 0x05c6902f, 0x60c09350, 0x66d6d168, 0x70d90337,
                 0x7a549ac3, 0x9012d552, 0x94a60f33, 0xa490ff36, 0xb030d552, 0xb0729450, 0xb12b4c4a, 0x0b7e7e60,
                 0xc4f84b2f, 0xc533f42f, 0xc8f60ec2, 0xc9d1bab9, 0xd329cb74, 0xe4b26ab4, 0xe70e5db0, 0xec072034,
-                // seed.btc.petertodd.org
+                // seed.btc.petertodd.net
                 0x10ac1242, 0x131c4a79, 0x1477da47, 0x2899ec63, 0x45660451, 0x4b1b0050, 0x6931d0c2, 0x070ed85f,
                 0x806a9950, 0x80b0d522, 0x810d2bc1, 0x829d3b8b, 0x848bdfb0, 0x87a5e52e, 0x9664bb25, 0xa021a6df,
                 0x0a5f8548, 0x0a66c752, 0xaaf5b64f, 0xabba464a, 0xc5df4165, 0xe8c5efd5, 0xfa08d01f,
@@ -137,7 +120,7 @@ public class MainNetParams extends AbstractBitcoinNetParams {
         };
     }
 
-    private static MainNetParams instance;
+    @Nullable private static MainNetParams instance;
     public static synchronized MainNetParams get() {
         if (instance == null) {
             instance = new MainNetParams();
@@ -149,18 +132,11 @@ public class MainNetParams extends AbstractBitcoinNetParams {
     public Block getGenesisBlock() {
         synchronized (GENESIS_HASH) {
             if (genesisBlock == null) {
-                genesisBlock = Block.createGenesis(this);
-                genesisBlock.setDifficultyTarget(Block.STANDARD_MAX_DIFFICULTY_TARGET);
-                genesisBlock.setTime(GENESIS_TIME);
-                genesisBlock.setNonce(GENESIS_NONCE);
-                checkState(genesisBlock.getHash().equals(GENESIS_HASH), "Invalid genesis hash");
+                genesisBlock = Block.createGenesis(GENESIS_TIME, Difficulty.STANDARD_MAX_DIFFICULTY_TARGET,
+                        GENESIS_NONCE);
+                checkState(genesisBlock.getHash().equals(GENESIS_HASH), () -> "invalid genesis hash");
             }
         }
         return genesisBlock;
-    }
-
-    @Override
-    public String getPaymentProtocolId() {
-        return PAYMENT_PROTOCOL_ID_MAINNET;
     }
 }

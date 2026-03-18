@@ -16,9 +16,10 @@
 
 package org.bitcoinj.core;
 
-import javax.annotation.Nullable;
+import org.bitcoinj.base.Coin;
 
-import static com.google.common.base.Preconditions.checkNotNull;
+import org.jspecify.annotations.Nullable;
+import java.util.Objects;
 
 /**
  * Thrown to indicate that you don't have enough money available to perform the requested operation.
@@ -33,11 +34,26 @@ public class InsufficientMoneyException extends Exception {
     }
 
     public InsufficientMoneyException(Coin missing) {
-        this(missing, "Insufficient money,  missing " + missing.toFriendlyString());
+        this(missing, "Insufficient money, missing " + missing.toFriendlyString());
     }
 
     public InsufficientMoneyException(Coin missing, String message) {
         super(message);
-        this.missing = checkNotNull(missing);
+        this.missing = Objects.requireNonNull(missing);
+    }
+
+    public InsufficientMoneyException(Coin missing, Coin available, Coin outputs, Coin fee) {
+        this(missing, format(missing, available, outputs, fee));
+    }
+
+    /**
+     * @param missing Amount missing
+     * @param available Amount available (e.g. found by CoinSelector)
+     * @param outputs total amount of output requested
+     * @param fee calculated fee required for transaction
+     * @return An exception message
+     */
+    static String format(Coin missing, Coin available, Coin outputs, Coin fee) {
+        return String.format("Insufficient money, missing %s (available: %s, total outputs: %s, fee: %s)", missing.toFriendlyString(), available.toFriendlyString(), outputs.toFriendlyString(), fee.toFriendlyString());
     }
 }

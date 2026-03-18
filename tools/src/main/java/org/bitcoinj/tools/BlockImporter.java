@@ -16,56 +16,62 @@
 
 package org.bitcoinj.tools;
 
-import org.bitcoinj.core.*;
-import org.bitcoinj.params.MainNetParams;
-import org.bitcoinj.params.TestNet3Params;
-import org.bitcoinj.store.*;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.core.AbstractBlockChain;
+import org.bitcoinj.core.Block;
+import org.bitcoinj.core.BlockChain;
+import org.bitcoinj.core.FullPrunedBlockChain;
+import org.bitcoinj.core.NetworkParameters;
+import org.bitcoinj.core.PrunedException;
+import org.bitcoinj.core.VerificationException;
+import org.bitcoinj.store.BlockStore;
+import org.bitcoinj.store.BlockStoreException;
+import org.bitcoinj.store.FullPrunedBlockStore;
+import org.bitcoinj.store.MemoryBlockStore;
+import org.bitcoinj.store.MemoryFullPrunedBlockStore;
+import org.bitcoinj.store.SPVBlockStore;
 import org.bitcoinj.utils.BlockFileLoader;
-import com.google.common.base.Preconditions;
 
 import java.io.File;
+
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
 
 /** Very thin wrapper around {@link BlockFileLoader} */
 public class BlockImporter {
     public static void main(String[] args) throws BlockStoreException, VerificationException, PrunedException {
-        System.out.println("USAGE: BlockImporter (prod|test) (H2|Disk|MemFull|Mem|SPV) [blockStore]");
+        System.out.println("USAGE: BlockImporter (mainnet|testnet|signet|regtest) (MemFull|Mem|SPV) [blockStore]");
         System.out.println("       blockStore is required unless type is Mem or MemFull");
-        System.out.println("       eg BlockImporter prod H2 /home/user/bitcoinj.h2store");
         System.out.println("       Does full verification if the store supports it");
-        Preconditions.checkArgument(args.length == 2 || args.length == 3);
-        
-        NetworkParameters params;
-        if (args[0].equals("test"))
-            params = TestNet3Params.get();
-        else
-            params = MainNetParams.get();
-        new Context(params);
-        
+        checkArgument(args.length == 2 || args.length == 3);
+
+        BitcoinNetwork network = BitcoinNetwork.fromString(args[1])
+                .orElseThrow(() -> new IllegalArgumentException("Unknown network: " + args[1]));
+        NetworkParameters params = NetworkParameters.of(network);
+
         BlockStore store;
-        if (args[1].equals("H2")) {
-            Preconditions.checkArgument(args.length == 3);
-            store = new H2FullPrunedBlockStore(params, args[2], 100);
-        } else if (args[1].equals("MemFull")) {
-            Preconditions.checkArgument(args.length == 2);
-            store = new MemoryFullPrunedBlockStore(params, 100);
-        } else if (args[1].equals("Mem")) {
-            Preconditions.checkArgument(args.length == 2);
-            store = new MemoryBlockStore(params);
-        } else if (args[1].equals("SPV")) {
-            Preconditions.checkArgument(args.length == 3);
-            store = new SPVBlockStore(params, new File(args[2]));
-        } else {
-            System.err.println("Unknown store " + args[1]);
-            return;
+        switch (args[1]) {
+            case "MemFull":
+                checkArgument(args.length == 2);
+                store = new MemoryFullPrunedBlockStore(params, 100);
+                break;
+            case "Mem":
+                checkArgument(args.length == 2);
+                store = new MemoryBlockStore(params.getGenesisBlock());
+                break;
+            case "SPV":
+                checkArgument(args.length == 3);
+                store = new SPVBlockStore(params, new File(args[2]));
+                break;
+            default:
+                System.err.println("Unknown store " + args[1]);
+                return;
         }
         
-        AbstractBlockChain chain = null;
-        if (store instanceof FullPrunedBlockStore)
-            chain = new FullPrunedBlockChain(params, (FullPrunedBlockStore) store);
-        else
-            chain = new BlockChain(params, store);
+        AbstractBlockChain chain = (store instanceof FullPrunedBlockStore) ?
+                new FullPrunedBlockChain(network, (FullPrunedBlockStore) store) :
+                new BlockChain(network, store);
         
-        BlockFileLoader loader = new BlockFileLoader(params, BlockFileLoader.getReferenceClientBlockFileList());
+        BlockFileLoader loader = new BlockFileLoader(network, BlockFileLoader.getReferenceClientBlockFileList());
         
         for (Block block : loader)
             chain.add(block);

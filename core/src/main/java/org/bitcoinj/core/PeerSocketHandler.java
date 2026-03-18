@@ -16,40 +16,43 @@
 
 package org.bitcoinj.core;
 
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import org.bitcoinj.net.AbstractTimeoutHandler;
+import com.google.common.annotations.VisibleForTesting;
+import org.bitcoinj.base.internal.FutureUtils;
 import org.bitcoinj.net.MessageWriteTarget;
 import org.bitcoinj.net.NioClient;
 import org.bitcoinj.net.NioClientManager;
+import org.bitcoinj.net.SocketTimeoutTask;
 import org.bitcoinj.net.StreamConnection;
+import org.bitcoinj.net.TimeoutHandler;
 import org.bitcoinj.utils.Threading;
-import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.net.ConnectException;
-import java.net.InetSocketAddress;
 import java.nio.Buffer;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.NotYetConnectedException;
+import java.time.Duration;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.Lock;
 
-import static com.google.common.base.Preconditions.*;
+import static org.bitcoinj.base.internal.Preconditions.checkArgument;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * Handles high-level message (de)serialization for peers, acting as the bridge between the
  * {@code org.bitcoinj.net} classes and {@link Peer}.
  */
-public abstract class PeerSocketHandler extends AbstractTimeoutHandler implements StreamConnection {
+public abstract class PeerSocketHandler implements TimeoutHandler, StreamConnection {
     private static final Logger log = LoggerFactory.getLogger(PeerSocketHandler.class);
     private final Lock lock = Threading.lock(PeerSocketHandler.class);
+    private final SocketTimeoutTask timeoutTask;
 
     private final MessageSerializer serializer;
-    protected PeerAddress peerAddress;
+    protected final PeerAddress peerAddress;
     // If we close() before we know our writeTarget, set this to true to call writeTarget.closeConnection() right away.
     private boolean closePending = false;
     // writeTarget will be thread-safe, and may call into PeerGroup, which calls us, so we should call it unlocked
@@ -62,16 +65,20 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
     private int largeReadBufferPos;
     private BitcoinSerializer.BitcoinPacketHeader header;
 
-    public PeerSocketHandler(NetworkParameters params, InetSocketAddress remoteIp) {
-        checkNotNull(params);
-        serializer = params.getDefaultSerializer();
-        this.peerAddress = new PeerAddress(params, remoteIp);
+    protected PeerSocketHandler(PeerAddress peerAddress, MessageSerializer messageSerializer) {
+        this.peerAddress = Objects.requireNonNull(peerAddress);
+        this.serializer = Objects.requireNonNull(messageSerializer);
+        this.timeoutTask = new SocketTimeoutTask(this::timeoutOccurred);
     }
 
-    public PeerSocketHandler(NetworkParameters params, PeerAddress peerAddress) {
-        checkNotNull(params);
-        serializer = params.getDefaultSerializer();
-        this.peerAddress = checkNotNull(peerAddress);
+    @Override
+    public void setTimeoutEnabled(boolean timeoutEnabled) {
+        timeoutTask.setTimeoutEnabled(timeoutEnabled);
+    }
+
+    @Override
+    public void setSocketTimeout(Duration timeout) {
+        timeoutTask.setSocketTimeout(timeout);
     }
 
     /**
@@ -79,7 +86,7 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
      * the peer will have received it. Throws NotYetConnectedException if we are not yet connected to the remote peer.
      * TODO: Maybe use something other than the unchecked NotYetConnectedException here
      */
-    public ListenableFuture sendMessage(Message message) throws NotYetConnectedException {
+    public CompletableFuture<Void> sendMessage(Message message) throws NotYetConnectedException {
         lock.lock();
         try {
             if (writeTarget == null)
@@ -94,7 +101,7 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
             return writeTarget.writeBytes(out.toByteArray());
         } catch (IOException e) {
             exceptionCaught(e);
-            return Futures.immediateFailedFuture(e);
+            return FutureUtils.failedFuture(e);
         }
     }
 
@@ -114,7 +121,6 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
         writeTarget.closeConnection();
     }
 
-    @Override
     protected void timeoutOccurred() {
         log.info("{}: Timed out", getAddress());
         close();
@@ -123,73 +129,68 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
     /**
      * Called every time a message is received from the network
      */
-    protected abstract void processMessage(Message m) throws Exception;
+    protected abstract void processMessage(Message m);
 
     @Override
     public int receiveBytes(ByteBuffer buff) {
         checkArgument(buff.position() == 0 &&
                 buff.capacity() >= BitcoinSerializer.BitcoinPacketHeader.HEADER_LENGTH + 4);
-        try {
-            // Repeatedly try to deserialize messages until we hit a BufferUnderflowException
-            boolean firstMessage = true;
-            while (true) {
-                // If we are in the middle of reading a message, try to fill that one first, before we expect another
-                if (largeReadBuffer != null) {
-                    // This can only happen in the first iteration
-                    checkState(firstMessage);
-                    // Read new bytes into the largeReadBuffer
-                    int bytesToGet = Math.min(buff.remaining(), largeReadBuffer.length - largeReadBufferPos);
-                    buff.get(largeReadBuffer, largeReadBufferPos, bytesToGet);
-                    largeReadBufferPos += bytesToGet;
-                    // Check the largeReadBuffer's status
-                    if (largeReadBufferPos == largeReadBuffer.length) {
-                        // ...processing a message if one is available
-                        processMessage(serializer.deserializePayload(header, ByteBuffer.wrap(largeReadBuffer)));
-                        largeReadBuffer = null;
-                        header = null;
-                        firstMessage = false;
-                    } else // ...or just returning if we don't have enough bytes yet
-                        return buff.position();
-                }
-                // Now try to deserialize any messages left in buff
-                Message message;
-                int preSerializePosition = buff.position();
-                try {
-                    message = serializer.deserialize(buff);
-                } catch (BufferUnderflowException e) {
-                    // If we went through the whole buffer without a full message, we need to use the largeReadBuffer
-                    if (firstMessage && buff.limit() == buff.capacity()) {
-                        // ...so reposition the buffer to 0 and read the next message header
-                        ((Buffer) buff).position(0);
-                        try {
-                            serializer.seekPastMagicBytes(buff);
-                            header = serializer.deserializeHeader(buff);
-                            // Initialize the largeReadBuffer with the next message's size and fill it with any bytes
-                            // left in buff
-                            largeReadBuffer = new byte[header.size];
-                            largeReadBufferPos = buff.remaining();
-                            buff.get(largeReadBuffer, 0, largeReadBufferPos);
-                        } catch (BufferUnderflowException e1) {
-                            // If we went through a whole buffer's worth of bytes without getting a header, give up
-                            // In cases where the buff is just really small, we could create a second largeReadBuffer
-                            // that we use to deserialize the magic+header, but that is rather complicated when the buff
-                            // should probably be at least that big anyway (for efficiency)
-                            throw new ProtocolException("No magic bytes+header after reading " + buff.capacity() + " bytes");
-                        }
-                    } else {
-                        // Reposition the buffer to its original position, which saves us from skipping messages by
-                        // seeking past part of the magic bytes before all of them are in the buffer
-                        ((Buffer) buff).position(preSerializePosition);
-                    }
+        // Repeatedly try to deserialize messages until we hit a BufferUnderflowException
+        boolean firstMessage = true;
+        while (true) {
+            // If we are in the middle of reading a message, try to fill that one first, before we expect another
+            if (largeReadBuffer != null) {
+                // This can only happen in the first iteration
+                checkState(firstMessage);
+                // Read new bytes into the largeReadBuffer
+                int bytesToGet = Math.min(buff.remaining(), largeReadBuffer.length - largeReadBufferPos);
+                buff.get(largeReadBuffer, largeReadBufferPos, bytesToGet);
+                largeReadBufferPos += bytesToGet;
+                // Check the largeReadBuffer's status
+                if (largeReadBufferPos == largeReadBuffer.length) {
+                    // ...processing a message if one is available
+                    processMessage(serializer.deserializePayload(header, ByteBuffer.wrap(largeReadBuffer)));
+                    largeReadBuffer = null;
+                    header = null;
+                    firstMessage = false;
+                } else // ...or just returning if we don't have enough bytes yet
                     return buff.position();
-                }
-                // Process our freshly deserialized message
-                processMessage(message);
-                firstMessage = false;
             }
-        } catch (Exception e) {
-            exceptionCaught(e);
-            return -1; // Returning -1 also throws an IllegalStateException upstream and kills the connection
+            // Now try to deserialize any messages left in buff
+            Message message;
+            int preSerializePosition = buff.position();
+            try {
+                message = serializer.deserialize(buff);
+            } catch (BufferUnderflowException e) {
+                // If we went through the whole buffer without a full message, we need to use the largeReadBuffer
+                if (firstMessage && buff.limit() == buff.capacity()) {
+                    // ...so reposition the buffer to 0 and read the next message header
+                    ((Buffer) buff).position(0);
+                    try {
+                        serializer.seekPastMagicBytes(buff);
+                        header = serializer.deserializeHeader(buff);
+                        // Initialize the largeReadBuffer with the next message's size and fill it with any bytes
+                        // left in buff
+                        largeReadBuffer = new byte[header.size];
+                        largeReadBufferPos = buff.remaining();
+                        buff.get(largeReadBuffer, 0, largeReadBufferPos);
+                    } catch (BufferUnderflowException e1) {
+                        // If we went through a whole buffer's worth of bytes without getting a header, give up
+                        // In cases where the buff is just really small, we could create a second largeReadBuffer
+                        // that we use to deserialize the magic+header, but that is rather complicated when the buff
+                        // should probably be at least that big anyway (for efficiency)
+                        throw new ProtocolException("No magic bytes+header after reading " + buff.capacity() + " bytes");
+                    }
+                } else {
+                    // Reposition the buffer to its original position, which saves us from skipping messages by
+                    // seeking past part of the magic bytes before all of them are in the buffer
+                    ((Buffer) buff).position(preSerializePosition);
+                }
+                return buff.position();
+            }
+            // Process our freshly deserialized message
+            processMessage(message);
+            firstMessage = false;
         }
     }
 
@@ -200,7 +201,7 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
      */
     @Override
     public void setWriteTarget(MessageWriteTarget writeTarget) {
-        checkArgument(writeTarget != null);
+        Objects.requireNonNull(writeTarget);
         lock.lock();
         boolean closeNow = false;
         try {
@@ -230,11 +231,11 @@ public abstract class PeerSocketHandler extends AbstractTimeoutHandler implement
     private void exceptionCaught(Exception e) {
         PeerAddress addr = getAddress();
         String s = addr == null ? "?" : addr.toString();
-        if (e instanceof ConnectException || e instanceof IOException) {
+        if (e instanceof IOException) {
             // Short message for network errors
-            log.info(s + " - " + e.getMessage());
+            log.info("{} - {}", s, e.getMessage());
         } else {
-            log.warn(s + " - ", e);
+            log.warn("Exception communicating with Peer at {}", s, e);
             Thread.UncaughtExceptionHandler handler = Threading.uncaughtExceptionHandler;
             if (handler != null)
                 handler.uncaughtException(Thread.currentThread(), e);

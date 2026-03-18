@@ -16,63 +16,97 @@
 
 package org.bitcoinj.core;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-
-import java.util.List;
-
-import org.bitcoinj.params.UnitTestParams;
-import org.bitcoinj.script.Script;
+import junitparams.JUnitParamsRunner;
+import junitparams.Parameters;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Coin;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.base.Sha256Hash;
+import org.bitcoinj.crypto.ECKey;
+import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.script.ScriptBuilder;
 import org.bitcoinj.testing.FakeTxBuilder;
-import org.bitcoinj.wallet.AllowUnconfirmedCoinSelector;
 import org.bitcoinj.wallet.SendRequest;
 import org.bitcoinj.wallet.Wallet;
+import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
-import com.google.common.collect.Lists;
+import java.nio.Buffer;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Random;
+import java.util.stream.Stream;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+@RunWith(JUnitParamsRunner.class)
 public class TransactionInputTest {
-    private static final NetworkParameters UNITTEST = UnitTestParams.get();
+    private static final NetworkParameters TESTNET = TestNet3Params.get();
+
+    @Before
+    public void setUp() throws Exception {
+        Context.propagate(new Context());
+    }
 
     @Test
     public void testStandardWalletDisconnect() throws Exception {
-        Wallet w = Wallet.createDeterministic(new Context(UNITTEST), Script.ScriptType.P2PKH);
+        Wallet w = Wallet.createDeterministic(BitcoinNetwork.TESTNET, ScriptType.P2PKH);
         Address a = w.currentReceiveAddress();
-        Transaction tx1 = FakeTxBuilder.createFakeTxWithoutChangeAddress(UNITTEST, Coin.COIN, a);
+        Transaction tx1 = FakeTxBuilder.createFakeTxWithoutChangeAddress(Coin.COIN, a);
         w.receivePending(tx1, null);
-        Transaction tx2 = new Transaction(UNITTEST);
-        tx2.addOutput(Coin.valueOf(99000000), new ECKey());
+        Transaction tx2 = new Transaction();
+        tx2.addOutput(Coin.valueOf(99000000), ECKey.random());
         SendRequest req = SendRequest.forTx(tx2);
         req.allowUnconfirmed();
         w.completeTx(req);
 
         TransactionInput txInToDisconnect = tx2.getInput(0);
+        TransactionOutPoint txOutPoint = txInToDisconnect.getOutpoint();
 
-        assertEquals(tx1, txInToDisconnect.getOutpoint().fromTx);
-        assertNull(txInToDisconnect.getOutpoint().connectedOutput);
+        // Before disconnect, txOutPoint getFromTx() references tx1 and
+        // getConnectedOutput() references the correct indexed output of tx1
+        assertEquals(tx1, txOutPoint.getFromTx());
+        assertEquals(tx1.getOutput(txOutPoint.index()), txOutPoint.getConnectedOutput());
 
+        // Disconnect the input from tx1
         txInToDisconnect.disconnect();
+        TransactionOutPoint newTxOutPoint = txInToDisconnect.getOutpoint();
 
-        assertNull(txInToDisconnect.getOutpoint().fromTx);
-        assertNull(txInToDisconnect.getOutpoint().connectedOutput);
+        // Since TransactionOutPoint is immutable, we expect a new TransactionOutPoint object, but since equals() only
+        // compares index and hash, equals will return true.
+        assertNotSame(txOutPoint, newTxOutPoint);
+        assertEquals(txOutPoint, newTxOutPoint);
+
+        // After disconnect, newTxOutPoint getFromTx() and getConnectedOutput() are both null
+        assertNull(newTxOutPoint.getFromTx());
+        assertNull(newTxOutPoint.getConnectedOutput());
     }
 
     @Test
     public void testUTXOWalletDisconnect() throws Exception {
-        Wallet w = Wallet.createDeterministic(new Context(UNITTEST), Script.ScriptType.P2PKH);
+        Wallet w = Wallet.createDeterministic(BitcoinNetwork.TESTNET, ScriptType.P2PKH);
         Address a = w.currentReceiveAddress();
         final UTXO utxo = new UTXO(Sha256Hash.of(new byte[] { 1, 2, 3 }), 1, Coin.COIN, 0, false,
                 ScriptBuilder.createOutputScript(a));
-        w.setUTXOProvider(new UTXOProvider() {
+        w.setUTXOProviderInternal(new UTXOProvider() {
             @Override
-            public NetworkParameters getParams() {
-                return UNITTEST;
+            public Network network() {
+                return BitcoinNetwork.TESTNET;
             }
 
             @Override
             public List<UTXO> getOpenTransactionOutputs(List<ECKey> addresses) throws UTXOProviderException {
-                return Lists.newArrayList(utxo);
+                return Arrays.asList(utxo);
             }
 
             @Override
@@ -81,18 +115,65 @@ public class TransactionInputTest {
             }
         });
 
-        Transaction tx2 = new Transaction(UNITTEST);
-        tx2.addOutput(Coin.valueOf(99000000), new ECKey());
+        Transaction tx2 = new Transaction();
+        tx2.addOutput(Coin.valueOf(99000000), ECKey.random());
         w.completeTx(SendRequest.forTx(tx2));
 
         TransactionInput txInToDisconnect = tx2.getInput(0);
+        TransactionOutPoint txOutPoint = txInToDisconnect.getOutpoint();
 
-        assertNull(txInToDisconnect.getOutpoint().fromTx);
-        assertEquals(utxo.getHash(), txInToDisconnect.getOutpoint().connectedOutput.getParentTransactionHash());
+        // Before disconnect, txOutPoint getFromTx() returns null and
+        // getConnectedOutput() references the UTXO
+        assertNull(txOutPoint.getFromTx());
+        assertNotNull(txOutPoint.getConnectedOutput());
+        assertEquals(utxo.getHash(), txOutPoint.getConnectedOutput().getParentTransactionHash());
+        assertEquals(utxo.getIndex(), txOutPoint.getConnectedOutput().getIndex());
 
+        // Disconnect the input from its UTXO
         txInToDisconnect.disconnect();
+        TransactionOutPoint newTxOutPoint = txInToDisconnect.getOutpoint();
 
-        assertNull(txInToDisconnect.getOutpoint().fromTx);
-        assertNull(txInToDisconnect.getOutpoint().connectedOutput);
+        // Since TransactionOutPoint is immutable, we expect a new TransactionOutPoint object, but since equals() only
+        // compares index and hash, equals will return true.
+        assertNotSame(txOutPoint, newTxOutPoint);
+        assertEquals(txOutPoint, newTxOutPoint);
+
+        // After disconnect, newTxOutPoint getFromTx() and getConnectedOutput() are both null
+        assertNull(newTxOutPoint.getFromTx());
+        assertNull(newTxOutPoint.getConnectedOutput());
+    }
+
+    @Test
+    public void coinbaseInput() {
+        TransactionInput coinbaseInput = TransactionInput.coinbaseInput(new Transaction(), new byte[2]);
+        assertTrue(coinbaseInput.isCoinBase());
+    }
+
+    @Test
+    @Parameters(method = "randomInputs")
+    public void readAndWrite(TransactionInput input) {
+        ByteBuffer buf = ByteBuffer.allocate(input.messageSize());
+        input.write(buf);
+        assertFalse(buf.hasRemaining());
+        ((Buffer) buf).rewind();
+        TransactionInput inputCopy = TransactionInput.read(buf, input.getParentTransaction());
+        assertFalse(buf.hasRemaining());
+        assertEquals(input, inputCopy);
+    }
+
+    private Iterator<TransactionInput> randomInputs() {
+        Random random = new Random();
+        Transaction parent = new Transaction();
+        return Stream.generate(() -> {
+            byte[] randomBytes = new byte[100];
+            random.nextBytes(randomBytes);
+            return new TransactionInput(parent, randomBytes, TransactionOutPoint.UNCONNECTED,
+                    Coin.ofSat(Math.abs(random.nextLong())));
+        }).limit(10).iterator();
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void negativeValue() {
+        new TransactionInput(new Transaction(), new byte[0], TransactionOutPoint.UNCONNECTED, Coin.ofSat(-1));
     }
 }

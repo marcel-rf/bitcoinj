@@ -16,20 +16,11 @@
 
 package org.bitcoinj.examples;
 
-import org.bitcoinj.core.*;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.core.TransactionConfidence;
 import org.bitcoinj.kits.WalletAppKit;
-import org.bitcoinj.params.TestNet3Params;
-import org.bitcoinj.script.Script;
-import org.bitcoinj.wallet.Wallet;
-import org.bitcoinj.wallet.listeners.KeyChainEventListener;
-import org.bitcoinj.wallet.listeners.ScriptsChangeEventListener;
-import org.bitcoinj.wallet.listeners.WalletCoinsReceivedEventListener;
-import org.bitcoinj.wallet.listeners.WalletCoinsSentEventListener;
 
 import java.io.File;
-import java.util.List;
-
-import org.bitcoinj.core.listeners.TransactionConfidenceEventListener;
 
 /**
  * The following example shows how to use the by bitcoinj provided WalletAppKit.
@@ -43,31 +34,28 @@ public class Kit {
 
         // First we configure the network we want to use.
         // The available options are:
-        // - MainNetParams
-        // - TestNet3Params
-        // - RegTestParams
+        // - BitcoinNetwork.MAINNET
+        // - BitcoinNetwork.TESTTEST
+        // - BitcoinNetwork.SIGNET
+        // - BitcoinNetwork.REGTEST
         // While developing your application you probably want to use the Regtest mode and run your local bitcoin network. Run bitcoind with the -regtest flag
         // To test you app with a real network you can use the testnet. The testnet is an alternative bitcoin network that follows the same rules as main network.
         // Coins are worth nothing and you can get coins from a faucet.
         // 
         // For more information have a look at: https://bitcoinj.github.io/testing and https://bitcoin.org/en/developer-examples#testing-applications
-        NetworkParameters params = TestNet3Params.get();
+        BitcoinNetwork network = BitcoinNetwork.TESTNET;
 
-        // Now we initialize a new WalletAppKit. The kit handles all the boilerplate for us and is the easiest way to get everything up and running.
-        // Have a look at the WalletAppKit documentation and its source to understand what's happening behind the scenes: https://github.com/bitcoinj/bitcoinj/blob/master/core/src/main/java/org/bitcoinj/kits/WalletAppKit.java
-        WalletAppKit kit = new WalletAppKit(params, new File("."), "walletappkit-example");
-
-        // In case you want to connect with your local bitcoind tell the kit to connect to localhost.
-        // You must do that in reg test mode.
-        //kit.connectToLocalHost();
-
-        // Now we start the kit and sync the blockchain.
-        // bitcoinj is working a lot with the Google Guava libraries. The WalletAppKit extends the AbstractIdleService. Have a look at the introduction to Guava services: https://github.com/google/guava/wiki/ServiceExplained
-        kit.startAsync();
-        kit.awaitRunning();
+        // Initialize and start a WalletAppKit. The kit handles all the boilerplate for us and is the easiest way to get everything up and running.
+        // Look at the WalletAppKit documentation and its source to understand what's happening behind the scenes: https://github.com/bitcoinj/bitcoinj/blob/master/core/src/main/java/org/bitcoinj/kits/WalletAppKit.java
+        // WalletAppKit extends the Guava AbstractIdleService. Have a look at the introduction to Guava services: https://github.com/google/guava/wiki/ServiceExplained
+        WalletAppKit kit = WalletAppKit.launch(network, new File("."), "walletappkit-example", (k) -> {
+            // In case you want to connect with your local bitcoind tell the kit to connect to localhost.
+            // This is done automatically in reg test mode.
+            // k.connectToLocalHost();
+        });
 
         kit.wallet().addCoinsReceivedEventListener((wallet, tx, prevBalance, newBalance) -> {
-            System.out.println("-----> coins resceived: " + tx.getTxId());
+            System.out.println("-----> coins received: " + tx.getTxId());
             System.out.println("received: " + tx.getValue(wallet));
         });
 

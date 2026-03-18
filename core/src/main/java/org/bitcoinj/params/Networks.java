@@ -16,19 +16,22 @@
 
 package org.bitcoinj.params;
 
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.SegwitAddress;
 import org.bitcoinj.core.NetworkParameters;
 
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
 /**
  * Utility class that holds all the registered {@link NetworkParameters} types used for address auto discovery.
  * By default only {@link MainNetParams} and {@link TestNet3Params} are used. If you want to use {@link RegTestParams}
  * or {@link UnitTestParams} use {@code register} and then {@code unregister} the {@code TestNet3Params} as they don't
- * have their own Base58 version/type code (although for {@link org.bitcoinj.core.SegwitAddress} the human readable
+ * have their own Base58 version/type code (although for {@link SegwitAddress} the human-readable
  * parts for RegTest and TestNet are different.)
  */
 public class Networks {
@@ -37,6 +40,17 @@ public class Networks {
 
     public static Set<NetworkParameters> get() {
         return networks;
+    }
+
+    /**
+     * Find a {@link NetworkParameters} for a {@link Network}
+     * @param network The network to find (convert)
+     * @return Matching params if one was registered
+     */
+    public static Optional<NetworkParameters> find(Network network) {
+        return networks.stream()
+                .filter(p -> p.getId().equals(network.id()))
+                .findFirst();
     }
 
     /**

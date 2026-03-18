@@ -16,73 +16,73 @@
 
 package org.bitcoinj.examples;
 
-import org.bitcoinj.core.listeners.PeerConnectedEventListener;
-import org.bitcoinj.core.listeners.PeerDisconnectedEventListener;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.core.Context;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.Peer;
 import org.bitcoinj.core.PeerAddress;
 import org.bitcoinj.core.VersionMessage;
+import org.bitcoinj.net.NioClientManager;
 import org.bitcoinj.net.discovery.DnsDiscovery;
 import org.bitcoinj.net.discovery.PeerDiscoveryException;
-import org.bitcoinj.net.NioClientManager;
-import org.bitcoinj.params.MainNetParams;
 import org.bitcoinj.utils.BriefLogFormatter;
-import com.google.common.util.concurrent.Futures;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 
 /**
  * Prints a list of IP addresses obtained from DNS.
  */
 public class PrintPeers {
-    private static List<InetSocketAddress> dnsPeers;
+    record PeerDnsResult(List<InetSocketAddress> dnsPeers, Duration duration) {}
 
-    private static void printElapsed(long start) {
-        long now = System.currentTimeMillis();
-        System.out.println(String.format("Took %.2f seconds", (now - start) / 1000.0));
-    }
-
-    private static void printPeers(List<InetSocketAddress> addresses) {
-        for (InetSocketAddress address : addresses) {
+    private static void printPeers(PeerDnsResult result) {
+        for (InetSocketAddress address : result.dnsPeers()) {
             String hostAddress = address.getAddress().getHostAddress();
             System.out.println(String.format("%s:%d", hostAddress, address.getPort()));
         }
+        System.out.println(String.format("DNS query took %.2f seconds", result.duration().toMillis() / 1000.0));
     }
 
-    private static void printDNS() throws PeerDiscoveryException {
+    private static PeerDnsResult getPeers(Network network) throws PeerDiscoveryException {
         long start = System.currentTimeMillis();
-        DnsDiscovery dns = new DnsDiscovery(MainNetParams.get());
-        dnsPeers = dns.getPeers(0, 10, TimeUnit.SECONDS);
-        printPeers(dnsPeers);
-        printElapsed(start);
+        DnsDiscovery dns = new DnsDiscovery(network);
+        List<InetSocketAddress> dnsPeers = dns.getPeers(0, Duration.ofSeconds(10));
+        var duration = Duration.ofMillis(System.currentTimeMillis() - start);
+        return new PeerDnsResult(dnsPeers, duration);
     }
 
     public static void main(String[] args) throws Exception {
-        BriefLogFormatter.init();
+        BriefLogFormatter.init(Level.WARNING);
+        Context.propagate(new Context());
+        final Network network = BitcoinNetwork.MAINNET;
+        final NetworkParameters params = NetworkParameters.of(network);
         System.out.println("=== DNS ===");
-        printDNS();
+        PeerDnsResult result = getPeers(network);
+        printPeers(result);
         System.out.println("=== Version/chain heights ===");
 
         ArrayList<InetAddress> addrs = new ArrayList<>();
-        for (InetSocketAddress peer : dnsPeers) addrs.add(peer.getAddress());
+        for (InetSocketAddress peer : result.dnsPeers()) addrs.add(peer.getAddress());
         System.out.println("Scanning " + addrs.size() + " peers:");
 
-        final NetworkParameters params = MainNetParams.get();
         final Object lock = new Object();
         final long[] bestHeight = new long[1];
 
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        List<CompletableFuture<Boolean>> futures = new ArrayList<>();
         NioClientManager clientManager = new NioClientManager();
+        clientManager.start().join();
         for (final InetAddress addr : addrs) {
             InetSocketAddress address = new InetSocketAddress(addr, params.getPort());
             final Peer peer = new Peer(params, new VersionMessage(params, 0),
-                    new PeerAddress(params, address), null);
-            final CompletableFuture<Void> future = new CompletableFuture<>();
+                    PeerAddress.simple(address), null);
+            final CompletableFuture<Boolean> future = new CompletableFuture<>();
             // Once the connection has completed version handshaking ...
             peer.addConnectedEventListener((p, peerCount) -> {
                 // Check the chain height it claims to have.
@@ -101,18 +101,22 @@ public class PrintPeers {
                     }
                 }
                 // Now finish the future and close the connection
-                future.complete(null);
+                future.complete(true);
                 peer.close();
             });
             peer.addDisconnectedEventListener((p, peerCount) -> {
-                if (!future.isDone())
+                if (!future.isDone()) {
                     System.out.println("Failed to talk to " + addr);
-                future.complete(null);
+                    future.complete(false);
+                }
             });
             clientManager.openConnection(address, peer);
             futures.add(future);
         }
         // Wait for every tried connection to finish.
         CompletableFuture.allOf(futures.toArray( new CompletableFuture[0])).join();
+        int successful = futures.stream().mapToInt(f -> f.join() ? 1 : 0).sum();
+        int total = futures.size();
+        System.out.printf("Successfully talked to %d of %d nodes.\n", successful, total);
     }
 }

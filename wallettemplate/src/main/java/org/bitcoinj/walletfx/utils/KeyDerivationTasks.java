@@ -16,17 +16,15 @@
 
 package org.bitcoinj.walletfx.utils;
 
-import org.bitcoinj.crypto.KeyCrypterScrypt;
-import com.google.common.util.concurrent.Uninterruptibles;
+import org.jspecify.annotations.Nullable;
 import javafx.beans.property.ReadOnlyDoubleProperty;
 import javafx.concurrent.Task;
+import org.bitcoinj.crypto.AesKey;
+import org.bitcoinj.crypto.KeyCrypterScrypt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.bouncycastle.crypto.params.KeyParameter;
 
-import javax.annotation.*;
 import java.time.Duration;
-import java.util.concurrent.TimeUnit;
 
 import static org.bitcoinj.walletfx.utils.GuiUtils.checkGuiThread;
 
@@ -35,8 +33,10 @@ import static org.bitcoinj.walletfx.utils.GuiUtils.checkGuiThread;
  */
 public class KeyDerivationTasks {
     private static final Logger log = LoggerFactory.getLogger(KeyDerivationTasks.class);
+    // 60fps would require a 16 millisecond value here.
+    private static final Duration PROGRESS_UPDATE_INTERVAL = Duration.ofMillis(20);
 
-    public final Task<KeyParameter> keyDerivationTask;
+    public final Task<AesKey> keyDerivationTask;
     public final ReadOnlyDoubleProperty progress;
 
     private final Task<Void> progressTask;
@@ -46,11 +46,11 @@ public class KeyDerivationTasks {
     public KeyDerivationTasks(KeyCrypterScrypt scrypt, String password, @Nullable Duration targetTime) {
         keyDerivationTask = new Task<>() {
             @Override
-            protected KeyParameter call() throws Exception {
+            protected AesKey call() throws Exception {
                 long start = System.currentTimeMillis();
                 try {
                     log.info("Started key derivation");
-                    KeyParameter result = scrypt.deriveKey(password);
+                    AesKey result = scrypt.deriveKey(password);
                     timeTakenMsec = (int) (System.currentTimeMillis() - start);
                     log.info("Key derivation done in {}ms", timeTakenMsec);
                     return result;
@@ -64,7 +64,7 @@ public class KeyDerivationTasks {
         // And the fake progress meter ... if the vals were calculated correctly progress bar should reach 100%
         // a brief moment after the keys were derived successfully.
         progressTask = new Task<>() {
-            private KeyParameter aesKey;
+            private AesKey aesKey;
 
             @Override
             protected Void call() throws Exception {
@@ -76,8 +76,7 @@ public class KeyDerivationTasks {
                         double progress = (curTime - startTime) / (double) targetTimeMillis;
                         updateProgress(progress, 1.0);
 
-                        // 60fps would require 16msec sleep here.
-                        Uninterruptibles.sleepUninterruptibly(20, TimeUnit.MILLISECONDS);
+                        Thread.sleep(PROGRESS_UPDATE_INTERVAL.toMillis());
                     }
                     // Wait for the encryption thread before switching back to main UI.
                     updateProgress(1.0, 1.0);
@@ -102,6 +101,6 @@ public class KeyDerivationTasks {
         new Thread(progressTask, "Progress ticker").start();
     }
 
-    protected void onFinish(KeyParameter aesKey, int timeTakenMsec) {
+    protected void onFinish(AesKey aesKey, int timeTakenMsec) {
     }
 }

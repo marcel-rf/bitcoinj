@@ -16,27 +16,29 @@
 
 package org.bitcoinj.crypto;
 
-import org.bitcoinj.core.*;
+import org.bitcoinj.base.Network;
+import org.bitcoinj.base.ScriptType;
+import org.bitcoinj.base.internal.ByteUtils;
+import org.bitcoinj.base.exceptions.AddressFormatException;
+import org.bitcoinj.base.Base58;
+import org.bitcoinj.base.Sha256Hash;
 import org.bouncycastle.crypto.generators.SCrypt;
-
-import com.google.common.primitives.Bytes;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
-
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.text.Normalizer;
 import java.util.Arrays;
 
-import static com.google.common.base.Preconditions.checkState;
+import static org.bitcoinj.base.internal.Preconditions.checkState;
 
 /**
  * Implementation of <a href="https://github.com/bitcoin/bips/blob/master/bip-0038.mediawiki">BIP 38</a>
  * passphrase-protected private keys. Currently, only decryption is supported.
  */
-public class BIP38PrivateKey extends PrefixedChecksummedBytes {
+public class BIP38PrivateKey extends EncodedPrivateKey {
     public final boolean ecMultiply;
     public final boolean compressed;
     public final boolean hasLotAndSequence;
@@ -48,14 +50,14 @@ public class BIP38PrivateKey extends PrefixedChecksummedBytes {
 
     /**
      * Construct a password-protected private key from its Base58 representation.
-     * @param params
-     *            The network parameters of the chain that the key is for.
+     * @param network
+     *            The network of the chain that the key is for.
      * @param base58
      *            The textual form of the password-protected private key.
      * @throws AddressFormatException
      *             if the given base58 doesn't parse or the checksum is invalid
      */
-    public static BIP38PrivateKey fromBase58(NetworkParameters params, String base58) throws AddressFormatException {
+    public static BIP38PrivateKey fromBase58(Network network, String base58) throws AddressFormatException {
         byte[] versionAndDataBytes = Base58.decodeChecked(base58);
         int version = versionAndDataBytes[0] & 0xFF;
         byte[] bytes = Arrays.copyOfRange(versionAndDataBytes, 1, versionAndDataBytes.length);
@@ -93,12 +95,12 @@ public class BIP38PrivateKey extends PrefixedChecksummedBytes {
         }
         byte[] addressHash = Arrays.copyOfRange(bytes, 2, 6);
         byte[] content = Arrays.copyOfRange(bytes, 6, 38);
-        return new BIP38PrivateKey(params, bytes, ecMultiply, compressed, hasLotAndSequence, addressHash, content);
+        return new BIP38PrivateKey(network, bytes, ecMultiply, compressed, hasLotAndSequence, addressHash, content);
     }
 
-    private BIP38PrivateKey(NetworkParameters params, byte[] bytes, boolean ecMultiply, boolean compressed,
+    private BIP38PrivateKey(Network network, byte[] bytes, boolean ecMultiply, boolean compressed,
             boolean hasLotAndSequence, byte[] addressHash, byte[] content) throws AddressFormatException {
-        super(params, bytes);
+        super(network, bytes);
         this.ecMultiply = ecMultiply;
         this.compressed = compressed;
         this.hasLotAndSequence = hasLotAndSequence;
@@ -118,7 +120,7 @@ public class BIP38PrivateKey extends PrefixedChecksummedBytes {
     public ECKey decrypt(String passphrase) throws BadPassphraseException {
         String normalizedPassphrase = Normalizer.normalize(passphrase, Normalizer.Form.NFC);
         ECKey key = ecMultiply ? decryptEC(normalizedPassphrase) : decryptNoEC(normalizedPassphrase);
-        Sha256Hash hash = Sha256Hash.twiceOf(LegacyAddress.fromKey(params, key).toString().getBytes(StandardCharsets.US_ASCII));
+        Sha256Hash hash = Sha256Hash.twiceOf(key.toAddress(ScriptType.P2PKH, network).toString().getBytes(StandardCharsets.US_ASCII));
         byte[] actualAddressHash = Arrays.copyOfRange(hash.getBytes(), 0, 4);
         if (!Arrays.equals(actualAddressHash, addressHash))
             throw new BadPassphraseException();
@@ -131,7 +133,6 @@ public class BIP38PrivateKey extends PrefixedChecksummedBytes {
             byte[] key = Arrays.copyOfRange(derived, 32, 64);
             SecretKeySpec keyspec = new SecretKeySpec(key, "AES");
 
-            DRMWorkaround.maybeDisableExportControls();
             Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
 
             cipher.init(Cipher.DECRYPT_MODE, keyspec);
@@ -151,14 +152,14 @@ public class BIP38PrivateKey extends PrefixedChecksummedBytes {
 
             byte[] passFactorBytes = SCrypt.generate(normalizedPassphrase.getBytes(StandardCharsets.UTF_8), ownerSalt, 16384, 8, 8, 32);
             if (hasLotAndSequence) {
-                byte[] hashBytes = Bytes.concat(passFactorBytes, ownerEntropy);
+                byte[] hashBytes = ByteUtils.concat(passFactorBytes, ownerEntropy);
                 checkState(hashBytes.length == 40);
                 passFactorBytes = Sha256Hash.hashTwice(hashBytes);
             }
-            BigInteger passFactor = Utils.bytesToBigInteger(passFactorBytes);
+            BigInteger passFactor = ByteUtils.bytesToBigInteger(passFactorBytes);
             ECKey k = ECKey.fromPrivate(passFactor, true);
 
-            byte[] salt = Bytes.concat(addressHash, ownerEntropy);
+            byte[] salt = ByteUtils.concat(addressHash, ownerEntropy);
             checkState(salt.length == 12);
             byte[] derived = SCrypt.generate(k.getPubKey(), salt, 1024, 1, 1, 64);
             byte[] aeskey = Arrays.copyOfRange(derived, 32, 64);
@@ -173,15 +174,15 @@ public class BIP38PrivateKey extends PrefixedChecksummedBytes {
             for (int i = 0; i < 16; i++)
                 decrypted2[i] ^= derived[i + 16];
 
-            byte[] encrypted1 = Bytes.concat(Arrays.copyOfRange(content, 8, 16), Arrays.copyOfRange(decrypted2, 0, 8));
+            byte[] encrypted1 = ByteUtils.concat(Arrays.copyOfRange(content, 8, 16), Arrays.copyOfRange(decrypted2, 0, 8));
             byte[] decrypted1 = cipher.doFinal(encrypted1);
             checkState(decrypted1.length == 16);
             for (int i = 0; i < 16; i++)
                 decrypted1[i] ^= derived[i];
 
-            byte[] seed = Bytes.concat(decrypted1, Arrays.copyOfRange(decrypted2, 8, 16));
+            byte[] seed = ByteUtils.concat(decrypted1, Arrays.copyOfRange(decrypted2, 8, 16));
             checkState(seed.length == 24);
-            BigInteger seedFactor = Utils.bytesToBigInteger(Sha256Hash.hashTwice(seed));
+            BigInteger seedFactor = ByteUtils.bytesToBigInteger(Sha256Hash.hashTwice(seed));
             checkState(passFactor.signum() >= 0);
             checkState(seedFactor.signum() >= 0);
             BigInteger priv = passFactor.multiply(seedFactor).mod(ECKey.CURVE.getN());

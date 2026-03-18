@@ -16,27 +16,37 @@
 
 package org.bitcoinj.crypto;
 
-import com.google.common.collect.ImmutableList;
-import org.junit.Assert;
+import junitparams.JUnitParamsRunner;
+import junitparams.Parameters;
+import org.junit.Ignore;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
-import java.util.Collections;
 import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * @author Michael Sean Gilligan
  */
+@RunWith(JUnitParamsRunner.class)
 public class HDPathTest {
     @Test
-    public void testPrimaryConstructor() throws Exception {
-        HDPath path = new HDPath(true, Collections.<ChildNumber>emptyList());
-        Assert.assertTrue("Has private key returns false incorrectly", path.hasPrivateKey);
-        Assert.assertEquals("Path not empty", path.size(), 0);
+    public void testPrimaryConstructor() {
+        HDPath.HDFullPath path = HDPath.m();
+        assertTrue("Has private key returns false incorrectly", path.hasPrivateKey());
+        assertEquals("Path not empty", 0, path.size());
     }
 
     @Test
-    public void testExtendVarargs() throws Exception {
-        HDPath basePath = new HDPath(true, Collections.<ChildNumber>emptyList());
+    public void testExtendVarargs() {
+        HDPath.HDFullPath  basePath = HDPath.m();
+
+        assertTrue(basePath.hasPrivateKey());
+        assertEquals("m",  basePath.toString());
+
         // Make sure we can do a depth of 5 as per BIP44, etc.
         // m / 44' / coinType' / accountIndex' / change / addressIndex
         HDPath path1 = basePath.extend(ChildNumber.ZERO_HARDENED);
@@ -45,76 +55,241 @@ public class HDPathTest {
         HDPath path4 = basePath.extend(ChildNumber.ZERO_HARDENED, ChildNumber.ONE_HARDENED, ChildNumber.ZERO_HARDENED, ChildNumber.ONE);
         HDPath path5 = basePath.extend(ChildNumber.ZERO_HARDENED, ChildNumber.ONE_HARDENED, ChildNumber.ZERO_HARDENED, ChildNumber.ONE, ChildNumber.ZERO);
 
-        Assert.assertEquals("m/0H",  path1.toString());
-        Assert.assertEquals("m/0H/1H",  path2.toString());
-        Assert.assertEquals("m/0H/1H/0H",  path3.toString());
-        Assert.assertEquals("m/0H/1H/0H/1",  path4.toString());
-        Assert.assertEquals("m/0H/1H/0H/1/0",  path5.toString());
+        assertEquals("m/0H",  path1.toString());
+        assertEquals("m/0H/1H",  path2.toString());
+        assertEquals("m/0H/1H/0H",  path3.toString());
+        assertEquals("m/0H/1H/0H/1",  path4.toString());
+        assertEquals("m/0H/1H/0H/1/0",  path5.toString());
     }
 
     @Test
-    public void testFormatPath() {
-        Object[] tv = {
-                "M/44H/0H/0H/1/1",
-                ImmutableList.of(new ChildNumber(44, true), new ChildNumber(0, true), new ChildNumber(0, true),
-                        new ChildNumber(1, false), new ChildNumber(1, false)),
+    public void testParent() {
+        HDPath path1 = HDPath.parsePath("m/0H/1H");
 
-                "M/7H/3/3/1H",
-                ImmutableList.of(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
-                        new ChildNumber(1, true)),
+        assertEquals(HDPath.parsePath("m/0H"), path1.parent());
 
-                "M/1H/2H/3H",
-                ImmutableList.of(new ChildNumber(1, true), new ChildNumber(2, true), new ChildNumber(3, true)),
+        HDPath path2 = HDPath.parsePath("m/0H");
 
-                "M/1/2/3",
-                ImmutableList.of(new ChildNumber(1, false), new ChildNumber(2, false), new ChildNumber(3, false))
+        assertEquals(HDPath.parsePath("m"), path2.parent());
+
+        HDPath path3 = HDPath.parsePath("");
+
+        assertEquals(HDPath.parsePath(""), path3.parent());
+    }
+
+    @Test
+    public void testAncestorByIndex() {
+        HDPath path1 = HDPath.parsePath("m/0H/1H");
+
+        assertEquals(HDPath.parsePath("m/0H"), path1.ancestorByIndex(0));
+        assertEquals(HDPath.parsePath("m/0H/1H"), path1.ancestorByIndex(1));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testAncestorByIndexTooSmall() {
+        HDPath.parsePath("m/0H/1H").ancestorByIndex(-1);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testAncestorByIndexTooBig() {
+        HDPath.parsePath("m/0H/1H").ancestorByIndex(2);
+    }
+
+    @Test
+    public void testAncestorByDepth() {
+        HDPath path1 = HDPath.parsePath("m/0H/1H");
+
+        assertEquals(HDPath.parsePath("m/"), path1.ancestorByDepth(0));
+        assertEquals(HDPath.parsePath("m/0H"), path1.ancestorByDepth(1));
+        assertEquals(HDPath.parsePath("m/0H/1H"), path1.ancestorByDepth(2));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testAncestorByDepthTooSmall() {
+        HDPath.parsePath("m/0H/1H").ancestorByIndex(-1);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testAncestorByDepthTooBig() {
+        HDPath.parsePath("m/0H/1H").ancestorByIndex(3);
+    }
+
+    @Test
+    public void testAncestors() {
+        HDPath path = HDPath.parsePath("m/0H/1H/0H/1/0");
+
+        List<HDPath> ancestors = path.ancestors();
+
+        assertEquals(4, ancestors.size());
+        assertEquals(HDPath.parsePath("m/0H"),              ancestors.get(0));
+        assertEquals(HDPath.parsePath("m/0H/1H"),           ancestors.get(1));
+        assertEquals(HDPath.parsePath("m/0H/1H/0H"),        ancestors.get(2));
+        assertEquals(HDPath.parsePath("m/0H/1H/0H/1"),      ancestors.get(3));
+
+
+        List<HDPath> ancestorsWithSelf = path.ancestors(true);
+
+        assertEquals(5, ancestorsWithSelf.size());
+        assertEquals(HDPath.parsePath("m/0H"),              ancestorsWithSelf.get(0));
+        assertEquals(HDPath.parsePath("m/0H/1H"),           ancestorsWithSelf.get(1));
+        assertEquals(HDPath.parsePath("m/0H/1H/0H"),        ancestorsWithSelf.get(2));
+        assertEquals(HDPath.parsePath("m/0H/1H/0H/1"),      ancestorsWithSelf.get(3));
+        assertEquals(HDPath.parsePath("m/0H/1H/0H/1/0"),    ancestorsWithSelf.get(4));
+
+        HDPath rootPath = HDPath.parsePath("m/0H");
+
+        List<HDPath> empty = rootPath.ancestors();
+
+        assertEquals(0, empty.size());
+
+        List<HDPath> self = rootPath.ancestors(true);
+
+        assertEquals(1, self.size());
+        assertEquals(rootPath, self.get(0));
+
+
+        HDPath emptyPath = HDPath.m();
+
+        List<HDPath> empty2 = emptyPath.ancestors();
+
+        assertEquals(0, empty2.size());
+
+        List<HDPath> empty3 = emptyPath.ancestors(true);
+
+        assertEquals(0, empty3.size());
+    }
+
+    private PathVector[] toStringTestVectors() {
+        return new PathVector[] {
+                new PathVector (
+                        "M/44H/0H/0H/1/1",
+                        HDPath.M(new ChildNumber(44, true), new ChildNumber(0, true), new ChildNumber(0, true),
+                                new ChildNumber(1, false), new ChildNumber(1, false))
+                ),
+                new PathVector (
+                        "M/7H/3/3/1H",
+                        HDPath.M(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
+                                new ChildNumber(1, true))
+                ),
+                new PathVector (
+                        "M/1H/2H/3H",
+                        HDPath.M(new ChildNumber(1, true), new ChildNumber(2, true), new ChildNumber(3, true))
+                ),
+                new PathVector (
+                        "M/1/2/3",
+                        HDPath.M(new ChildNumber(1, false), new ChildNumber(2, false), new ChildNumber(3, false))
+                ),
+                new PathVector (
+                        "/44H/0H/0H/1/1",
+                        HDPath.partial(new ChildNumber(44, true), new ChildNumber(0, true), new ChildNumber(0, true),
+                                new ChildNumber(1, false), new ChildNumber(1, false))
+                ),
+                new PathVector (
+                        "/7H/3/3/1H",
+                        HDPath.partial(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
+                                new ChildNumber(1, true))
+                ),
+                new PathVector (
+                        "/1H/2H/3H",
+                        HDPath.partial(new ChildNumber(1, true), new ChildNumber(2, true), new ChildNumber(3, true))
+                ),
+                new PathVector (
+                        "/1/2/3",
+                        HDPath.partial(new ChildNumber(1, false), new ChildNumber(2, false), new ChildNumber(3, false))
+                )
         };
+    }
 
-        for (int i = 0; i < tv.length; i += 2) {
-            String expectedStrPath = (String) tv[i];
-            HDPath path = HDPath.M((List<ChildNumber>) tv[i + 1]);
+    @Test
+    @Parameters(method = "toStringTestVectors")
+    public void testToString(PathVector tv) {
+        String generatedStrPath = tv.path.toString();
+        assertEquals(tv.pathString, generatedStrPath);
+    }
 
-            String generatedStrPath = path.toString();
+    private PathVector[] parseTestVectors() {
+        return new PathVector[] {
+            new PathVector (
+                "M / 44H / 0H / 0H / 1 / 1",
+                HDPath.M(new ChildNumber(44, true), new ChildNumber(0, true), new ChildNumber(0, true),
+                    new ChildNumber(1, false), new ChildNumber(1, false))
+            ),
 
-            Assert.assertEquals(generatedStrPath, expectedStrPath);
+            new PathVector (
+                "M/7H/3/3/1H/",
+                HDPath.M(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
+                    new ChildNumber(1, true))
+            ),
+
+            new PathVector (
+                "m/7H/3/3/1H/",
+                HDPath.m(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
+                    new ChildNumber(1, true))
+            ),
+
+            new PathVector (
+                "1 H / 2 H / 3 H /",
+                HDPath.partial(new ChildNumber(1, true), new ChildNumber(2, true), new ChildNumber(3, true))
+            ),
+
+            new PathVector (
+                "1 / 2 / 3 /",
+                HDPath.partial(new ChildNumber(1, false), new ChildNumber(2, false), new ChildNumber(3, false))
+            )
+        };
+    }
+
+    @Test
+    @Parameters(method = "toStringTestVectors, parseTestVectors")
+    public void testParsePath(PathVector tv) {
+        HDPath path = HDPath.parsePath(tv.pathString);
+        assertEquals(tv.path, path);
+        // TODO Until equals() and hashCode() are FULLY implemented in HDPath, let's test `hasPrivateKey()` manually
+        if (path instanceof HDPath.HDFullPath) {
+            assertEquals(((HDPath.HDFullPath) tv.path).hasPrivateKey(), ((HDPath.HDFullPath) path).hasPrivateKey());
         }
     }
 
     @Test
-    public void testParsePath() {
-        Object[] tv = {
-                "M / 44H / 0H / 0H / 1 / 1",
-                ImmutableList.of(new ChildNumber(44, true), new ChildNumber(0, true), new ChildNumber(0, true),
-                        new ChildNumber(1, false), new ChildNumber(1, false)),
-                false,
+    @Parameters(method = "toStringTestVectors, parseTestVectors")
+    public void testAsPartial(PathVector tv) {
+        HDPath.HDPartialPath partialPath = tv.path.asPartial();
+        assertEquals(tv.path.list(), partialPath.list());
+    }
 
-                "M/7H/3/3/1H/",
-                ImmutableList.of(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
-                        new ChildNumber(1, true)),
-                false,
+    @Test
+    @Parameters(method = "toStringTestVectors, parseTestVectors")
+    public void testFullPathConversions(PathVector tv) {
+        if (tv.path instanceof HDPath.HDFullPath) {
+            // If test vector is full path, test roundtrip
+            HDPath.Prefix prefix = ((HDPath.HDFullPath) tv.path).prefix();
+            HDPath.HDPartialPath partialPath = tv.path.asPartial();
+            assertEquals(tv.path.list(), partialPath.list());
+            HDPath.HDFullPath roundTripPath = partialPath.asFull(prefix);
+            assertEquals(tv.path, roundTripPath);
+        } else {
+            // If test vector is partial path, test conversion to public and private
+            HDPath.HDPartialPath partialPath = (HDPath.HDPartialPath) tv.path;
+            HDPath.HDFullPath expectedPublic = HDPath.M(partialPath.list());
+            HDPath.HDFullPath expectedPrivate = HDPath.m(partialPath.list());
+            assertEquals(expectedPublic, partialPath.asPublic());
+            assertEquals(expectedPrivate, partialPath.asPrivate());
+        }
+    }
 
-                "m/7H/3/3/1H/",
-                ImmutableList.of(new ChildNumber(7, true), new ChildNumber(3, false), new ChildNumber(3, false),
-                        new ChildNumber(1, true)),
-                true,
+    @Test
+    public void equals_not_M_m() {
+        assertNotEquals(HDPath.M(), HDPath.m());
+    }
 
-                "1 H / 2 H / 3 H /",
-                ImmutableList.of(new ChildNumber(1, true), new ChildNumber(2, true), new ChildNumber(3, true)),
-                false,
+    // This should be a record
+    public static class PathVector {
+        final String pathString;
+        final HDPath path;
 
-                "1 / 2 / 3 /",
-                ImmutableList.of(new ChildNumber(1, false), new ChildNumber(2, false), new ChildNumber(3, false)),
-                false
-        };
-
-        for (int i = 0; i < tv.length; i += 3) {
-            String strPath = (String) tv[i];
-            List<ChildNumber> expectedPath = (List<ChildNumber>) tv[i + 1];
-            boolean expectedHasPrivateKey = (Boolean) tv[i + 2];
-
-            HDPath path = HDPath.parsePath(strPath);
-            Assert.assertEquals(path, expectedPath);
-            Assert.assertEquals(path.hasPrivateKey, expectedHasPrivateKey);
+        private PathVector(String pathString, HDPath path) {
+            this.pathString = pathString;
+            this.path = path;
         }
     }
 }

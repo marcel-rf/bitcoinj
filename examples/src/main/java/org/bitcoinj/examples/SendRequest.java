@@ -16,9 +16,12 @@
 
 package org.bitcoinj.examples;
 
-import org.bitcoinj.core.*;
+import org.bitcoinj.base.Address;
+import org.bitcoinj.base.BitcoinNetwork;
+import org.bitcoinj.base.Coin;
+import org.bitcoinj.core.InsufficientMoneyException;
+import org.bitcoinj.core.TransactionBroadcast;
 import org.bitcoinj.kits.WalletAppKit;
-import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.wallet.Wallet;
 import org.bitcoinj.wallet.Wallet.BalanceType;
 
@@ -33,11 +36,7 @@ public class SendRequest {
     public static void main(String[] args) throws Exception {
 
         // We use the WalletAppKit that handles all the boilerplate for us. Have a look at the Kit.java example for more details.
-        NetworkParameters params = TestNet3Params.get();
-        WalletAppKit kit = new WalletAppKit(params, new File("."), "sendrequest-example");
-        kit.startAsync();
-        kit.awaitRunning();
-
+        WalletAppKit kit = WalletAppKit.launch(BitcoinNetwork.TESTNET, new File("."), "sendrequest-example");
 
         // How much coins do we want to send?
         // The Coin class represents a monetary Bitcoin value.
@@ -46,7 +45,7 @@ public class SendRequest {
 
         // To which address you want to send the coins?
         // The Address class represents a Bitcoin address.
-        LegacyAddress to = LegacyAddress.fromBase58(params, "mupBAFeT63hXfeeT4rnAUcpKHDkz1n4fdw");
+        Address to = kit.wallet().parseAddress("bcrt1qspfueag7fvty7m8htuzare3xs898zvh30fttu2");
         System.out.println("Send money to: " + to.toString());
 
         // There are different ways to create and publish a SendRequest. This is probably the easiest one.
@@ -56,8 +55,8 @@ public class SendRequest {
         // When using the testnet you can use a faucet to get testnet coins.
         // In this example we catch the InsufficientMoneyException and register a BalanceFuture callback that runs once the wallet has enough balance.
         try {
-            Wallet.SendResult result = kit.wallet().sendCoins(kit.peerGroup(), to, value);
-            System.out.println("coins sent. transaction hash: " + result.tx.getTxId());
+            TransactionBroadcast result = kit.wallet().sendCoins(kit.peerGroup(), to, value);
+            System.out.println("coins sent. transaction hash: " + result.transaction().getTxId());
             // you can use a block explorer like https://www.biteasy.com/ to inspect the transaction with the printed transaction hash. 
         } catch (InsufficientMoneyException e) {
             System.out.println("Not enough coins in your wallet. Missing " + e.missing.getValue() + " satoshis are missing (including fees)");
